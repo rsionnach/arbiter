@@ -7,6 +7,7 @@ scores match ground truth. Pure arithmetic over stored data (ZFC).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 from arbiter.store.protocol import ScoreStore
@@ -34,4 +35,28 @@ class OverrideCalibration:
         self._store = store
 
     async def calibrate(self, window_days: int = 30) -> CalibrationReport:
-        raise NotImplementedError
+        since = datetime.now(timezone.utc) - timedelta(days=window_days)
+        overrides = await self._store.get_overrides(since=since, limit=10000)
+
+        if not overrides:
+            return CalibrationReport(
+                total_overrides=0,
+                mean_absolute_error=0.0,
+                dimensions_analyzed=[],
+            )
+
+        errors: list[float] = []
+        dimensions_seen: set[str] = set()
+
+        for ov in overrides:
+            error = abs(ov["original_score"] - ov["corrected_score"])
+            errors.append(error)
+            dimensions_seen.add(ov["dimension"])
+
+        mae = sum(errors) / len(errors)
+
+        return CalibrationReport(
+            total_overrides=len(overrides),
+            mean_absolute_error=mae,
+            dimensions_analyzed=sorted(dimensions_seen),
+        )

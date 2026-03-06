@@ -24,3 +24,13 @@ class ScoreStore(Protocol):
     async def save_override(
         self, eval_id: str, corrected_dimensions: dict[str, float], corrector: str
     ) -> None: ...
+
+    async def get_overrides(
+        self, since: datetime, limit: int = 100
+    ) -> list[dict]: ...
+
+    async def get_autonomy(self, agent_name: str) -> str | None: ...
+
+    async def set_autonomy(
+        self, agent_name: str, level: str, updated_by: str
+    ) -> None: ...

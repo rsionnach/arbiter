@@ -46,8 +46,9 @@ class QualityScore:
     agent_name: str
     task_id: str
     dimensions: dict[str, float]
-    confidence: float
-    evaluator_model: str
+    reasoning: dict[str, str] = field(default_factory=dict)
+    confidence: float = 0.0
+    evaluator_model: str = ""
     cost_usd: float | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 

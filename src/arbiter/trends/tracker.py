@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 from arbiter.store.protocol import ScoreStore
@@ -25,4 +26,36 @@ class StoreTrendTracker:
         self._store = store
 
     async def compute_window(self, agent_name: str, window_days: int) -> TrendWindow:
-        raise NotImplementedError
+        since = datetime.now(timezone.utc) - timedelta(days=window_days)
+        scores = await self._store.get_scores(agent_name, since=since, limit=10000)
+
+        if not scores:
+            return TrendWindow(
+                agent_name=agent_name,
+                window_days=window_days,
+                dimension_averages={},
+                evaluation_count=0,
+                confidence_mean=0.0,
+            )
+
+        dim_totals: dict[str, float] = {}
+        dim_counts: dict[str, int] = {}
+        confidence_sum = 0.0
+
+        for score in scores:
+            confidence_sum += score.confidence
+            for dim_name, dim_score in score.dimensions.items():
+                dim_totals[dim_name] = dim_totals.get(dim_name, 0.0) + dim_score
+                dim_counts[dim_name] = dim_counts.get(dim_name, 0) + 1
+
+        dimension_averages = {
+            name: dim_totals[name] / dim_counts[name] for name in dim_totals
+        }
+
+        return TrendWindow(
+            agent_name=agent_name,
+            window_days=window_days,
+            dimension_averages=dimension_averages,
+            evaluation_count=len(scores),
+            confidence_mean=confidence_sum / len(scores),
+        )

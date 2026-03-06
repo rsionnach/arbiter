@@ -29,5 +29,23 @@ CREATE TABLE IF NOT EXISTS overrides (
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS agent_autonomy (
+    agent_name TEXT PRIMARY KEY,
+    level TEXT NOT NULL DEFAULT 'full',
+    updated_by TEXT NOT NULL DEFAULT 'system',
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS governance_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    from_level TEXT NOT NULL,
+    to_level TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    triggered_by TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_evaluations_agent ON evaluations(agent_name, created_at);
 CREATE INDEX IF NOT EXISTS idx_overrides_eval ON overrides(eval_id);
+CREATE INDEX IF NOT EXISTS idx_governance_log_agent ON governance_log(agent_name, created_at);
