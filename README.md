@@ -236,7 +236,7 @@ The Arbiter is in the architecture phase. The design documented here reflects th
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. Tasks may also be posted on the [Wasteland Wanted Board](https://wasteland.gastownhall.ai/).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 
