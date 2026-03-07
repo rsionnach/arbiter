@@ -2,7 +2,7 @@
 
 Universal quality measurement engine for AI agent output. Evaluates agent output quality, tracks per-agent trends over rolling windows, detects degradation, self-calibrates its own judgment accuracy, and governs agent autonomy based on measured performance.
 
-**Status: architecture phase — implementation not yet started.**
+**Status: core implemented — pipeline, store, trends, calibration, governance all functional. Model call stub needs SDK wiring. Judgment SLOs, degradation detector, OTel, and cost tracking are next phase.**
 
 ---
 
@@ -51,7 +51,7 @@ Agent Output ──▶ Adapter ──▶ Evaluation Pipeline ──▶ Score Sto
 
 The adapter is the only integration point with external systems. Any agent system that implements the adapter interface can feed output into the Arbiter. The core pipeline never knows or cares what produced the output.
 
-Planned adapters: webhook (generic, any system that can POST JSON), GasTown, Devin. The webhook adapter is the default and works with anything.
+Implemented adapters: webhook (generic, any system that can POST JSON). Planned: GasTown, Devin. The webhook adapter is the default and works with anything.
 
 ### Evaluation Pipeline
 
@@ -59,23 +59,23 @@ Receives normalised agent output from adapters, constructs an evaluation prompt 
 
 ### Score Store
 
-Persists evaluation results with agent identity, timestamp, quality dimensions, confidence, and cost metadata. The backing store should be simple and self-contained for v1 (SQLite is fine). Schema is the contract — don't let storage implementation leak into the pipeline.
+Persists evaluation results with agent identity, timestamp, quality dimensions, confidence, and cost metadata. Implemented as SQLiteScoreStore with full CRUD for scores, overrides, and autonomy state. Schema is the contract — don't let storage implementation leak into the pipeline.
 
 ### Trend Tracker
 
-Aggregates scores over configurable rolling windows per agent. Computes reversal rate, false accept rate, precision, and recall across windows. No judgment logic here — this is arithmetic over stored scores.
+Aggregates scores over configurable rolling windows per agent. Currently computes dimension averages and confidence mean. Not yet implemented: reversal rate, false accept rate, precision, and recall. No judgment logic here — this is arithmetic over stored scores.
 
-### Degradation Detector
+### Degradation Detector (not yet implemented)
 
 Watches per-agent trend metrics against declared SLO thresholds. Emits alerts when thresholds are breached. Threshold logic is deterministic — the model is not involved in deciding whether a threshold was crossed, only in evaluating the output that produced the score.
 
 ### Self-Calibration Loop
 
-The Arbiter monitors its own judgment quality using the same pipeline it uses for other agents. Human corrections (override events) feed back into the Arbiter's own metrics: false accept rate, precision, recall. Every evaluation emits a `gen_ai.decision.*` OTel event. Every human correction emits a `gen_ai.override.*` event. The Arbiter has its own judgment SLO which humans can review through the same dashboards as any other agent.
+The Arbiter monitors its own judgment quality. Human corrections (override events) feed into OverrideCalibration which computes MAE per dimension. Not yet implemented: false accept rate, precision, recall, OTel event emission, judgment SLOs. The infrastructure (override storage, calibration reports) is in place — the metrics and telemetry layer is next.
 
 ### Governance Engine
 
-Watches judgment SLO error budgets. Takes governance actions when agents degrade:
+Implemented as ErrorBudgetGovernance. Currently watches dimension averages against a threshold and reduces autonomy when breached. Takes governance actions when agents degrade:
 
 | Trigger | Action |
 |---------|--------|
@@ -134,16 +134,27 @@ These feed into NthLayer-generated dashboards and SitRep correlation. Emit them 
 # arbiter.yaml
 evaluator:
   model: claude-sonnet-4-20250514
-  dimensions: [correctness, completeness, safety]
+  max_tokens: 4096
+
+store:
+  backend: sqlite
+  path: arbiter.db
+
+governance:
+  error_budget_window_days: 7
+  error_budget_threshold: 0.5
+
+dimensions:
+  - correctness
+  - completeness
+  - safety
 
 agents:
   - name: code-reviewer
-    source: webhook
-    judgment_slo:
-      reversal_rate:
-        target: 0.05
-        window: 30d
+    adapter: webhook
 ```
+
+Future: per-agent `judgment_slo` config (reversal rate targets, windowed compliance) will be added when judgment SLOs are implemented.
 
 ---
 
