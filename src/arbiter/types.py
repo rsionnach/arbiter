@@ -72,3 +72,6 @@ class TrendWindow:
     dimension_averages: dict[str, float]
     evaluation_count: int
     confidence_mean: float
+    reversal_rate: float = 0.0
+    total_cost_usd: float = 0.0
+    avg_cost_per_eval: float = 0.0

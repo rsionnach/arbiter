@@ -76,6 +76,35 @@ def test_trend_window_construction():
     assert tw.evaluation_count == 10
 
 
+def test_trend_window_new_fields_default():
+    tw = TrendWindow(
+        agent_name="a",
+        window_days=7,
+        dimension_averages={},
+        evaluation_count=0,
+        confidence_mean=0.0,
+    )
+    assert tw.reversal_rate == 0.0
+    assert tw.total_cost_usd == 0.0
+    assert tw.avg_cost_per_eval == 0.0
+
+
+def test_trend_window_new_fields_explicit():
+    tw = TrendWindow(
+        agent_name="a",
+        window_days=7,
+        dimension_averages={"x": 0.9},
+        evaluation_count=5,
+        confidence_mean=0.85,
+        reversal_rate=0.2,
+        total_cost_usd=0.05,
+        avg_cost_per_eval=0.01,
+    )
+    assert tw.reversal_rate == 0.2
+    assert tw.total_cost_usd == 0.05
+    assert tw.avg_cost_per_eval == 0.01
+
+
 def test_dimension_score_construction():
     ds = DimensionScore(name="correctness", score=0.95, reasoning="Looks good")
     assert ds.score == 0.95

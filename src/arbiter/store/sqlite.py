@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from arbiter.telemetry import emit_override_event, emit_state_transition_event
 from arbiter.types import QualityScore
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -107,6 +108,7 @@ class SQLiteScoreStore:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (str(uuid.uuid4()), eval_id, dim_name, original_score, corrected_score, corrector),
             )
+            emit_override_event(eval_id, dim_name, original_score, corrected_score, corrector)
         self._conn.commit()
 
     async def save_override(
@@ -114,16 +116,30 @@ class SQLiteScoreStore:
     ) -> None:
         await asyncio.to_thread(self._save_override_sync, eval_id, corrected_dimensions, corrector)
 
-    def _get_overrides_sync(self, since: datetime, limit: int) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT override_id, eval_id, dimension, original_score, corrected_score, corrector, created_at "
-            "FROM overrides WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
-            (since.isoformat(), limit),
-        ).fetchall()
+    def _get_overrides_sync(
+        self, since: datetime, limit: int, agent_name: str | None = None
+    ) -> list[dict]:
+        if agent_name is not None:
+            rows = self._conn.execute(
+                "SELECT o.override_id, o.eval_id, o.dimension, o.original_score, "
+                "o.corrected_score, o.corrector, o.created_at "
+                "FROM overrides o JOIN evaluations e ON o.eval_id = e.eval_id "
+                "WHERE o.created_at >= ? AND e.agent_name = ? "
+                "ORDER BY o.created_at DESC LIMIT ?",
+                (since.isoformat(), agent_name, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT override_id, eval_id, dimension, original_score, corrected_score, corrector, created_at "
+                "FROM overrides WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+                (since.isoformat(), limit),
+            ).fetchall()
         return [dict(r) for r in rows]
 
-    async def get_overrides(self, since: datetime, limit: int = 100) -> list[dict]:
-        return await asyncio.to_thread(self._get_overrides_sync, since, limit)
+    async def get_overrides(
+        self, since: datetime, limit: int = 100, agent_name: str | None = None
+    ) -> list[dict]:
+        return await asyncio.to_thread(self._get_overrides_sync, since, limit, agent_name)
 
     def _get_autonomy_sync(self, agent_name: str) -> str | None:
         row = self._conn.execute(
@@ -151,6 +167,7 @@ class SQLiteScoreStore:
             (agent_name, from_level, level, f"Autonomy changed to {level}", updated_by),
         )
         self._conn.commit()
+        emit_state_transition_event(agent_name, from_level, level, updated_by)
 
     async def set_autonomy(self, agent_name: str, level: str, updated_by: str) -> None:
         await asyncio.to_thread(self._set_autonomy_sync, agent_name, level, updated_by)

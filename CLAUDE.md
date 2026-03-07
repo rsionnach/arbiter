@@ -2,7 +2,7 @@
 
 Universal quality measurement engine for AI agent output. Evaluates agent output quality, tracks per-agent trends over rolling windows, detects degradation, self-calibrates its own judgment accuracy, and governs agent autonomy based on measured performance.
 
-**Status: core implemented — pipeline, store, trends, calibration, governance all functional. Model call stub needs SDK wiring. Judgment SLOs, degradation detector, OTel, and cost tracking are next phase.**
+**Status: fully implemented — pipeline, store, trends, calibration (MAE + judgment SLOs), governance, degradation detector, OTel instrumentation, cost tracking, CLI subcommands, OpenSRM manifest integration, and three adapters (webhook, GasTown, Devin).**
 
 ---
 
@@ -51,7 +51,7 @@ Agent Output ──▶ Adapter ──▶ Evaluation Pipeline ──▶ Score Sto
 
 The adapter is the only integration point with external systems. Any agent system that implements the adapter interface can feed output into the Arbiter. The core pipeline never knows or cares what produced the output.
 
-Implemented adapters: webhook (generic, any system that can POST JSON). Planned: GasTown, Devin. The webhook adapter is the default and works with anything.
+Implemented adapters: webhook (generic HTTP POST), GasTown (polls bd quality-review-result wisps), Devin (polls Devin REST API for completed sessions). The webhook adapter is the default and works with anything.
 
 ### Evaluation Pipeline
 
@@ -63,15 +63,15 @@ Persists evaluation results with agent identity, timestamp, quality dimensions, 
 
 ### Trend Tracker
 
-Aggregates scores over configurable rolling windows per agent. Currently computes dimension averages and confidence mean. Not yet implemented: reversal rate, false accept rate, precision, and recall. No judgment logic here — this is arithmetic over stored scores.
+Aggregates scores over configurable rolling windows per agent. Computes dimension averages, confidence mean, reversal rate, cost aggregation. No judgment logic here — this is arithmetic over stored scores.
 
-### Degradation Detector (not yet implemented)
+### Degradation Detector
 
-Watches per-agent trend metrics against declared SLO thresholds. Emits alerts when thresholds are breached. Threshold logic is deterministic — the model is not involved in deciding whether a threshold was crossed, only in evaluating the output that produced the score.
+Watches per-agent trend metrics against declared SLO thresholds. Emits alerts when thresholds are breached (reversal rate, dimension scores, confidence). Threshold logic is deterministic — the model is not involved in deciding whether a threshold was crossed, only in evaluating the output that produced the score.
 
 ### Self-Calibration Loop
 
-The Arbiter monitors its own judgment quality. Human corrections (override events) feed into OverrideCalibration which computes MAE per dimension. Not yet implemented: false accept rate, precision, recall, OTel event emission, judgment SLOs. The infrastructure (override storage, calibration reports) is in place — the metrics and telemetry layer is next.
+The Arbiter monitors its own judgment quality. Human corrections (override events) feed into OverrideCalibration (MAE per dimension) and JudgmentSLOChecker (false accept rate, precision, recall, windowed compliance). When an agent has an OpenSRM manifest, compliance is checked against declared targets. OTel `gen_ai.calibration.report` events are emitted with all metrics.
 
 ### Governance Engine
 
@@ -149,12 +149,27 @@ dimensions:
   - completeness
   - safety
 
+detection:
+  max_reversal_rate: 0.3
+  min_confidence: 0.5
+  min_dimension_scores:
+    correctness: 0.6
+
 agents:
   - name: code-reviewer
     adapter: webhook
+    manifest: manifests/code-reviewer.yaml
+  - name: gastown-worker
+    adapter: gastown
+    adapter_config:
+      rig_name: wyvern
+      poll_interval: 60
+  - name: devin-worker
+    adapter: devin
+    adapter_config:
+      api_key_env: DEVIN_API_KEY
+      poll_interval: 30
 ```
-
-Future: per-agent `judgment_slo` config (reversal rate targets, windowed compliance) will be added when judgment SLOs are implemented.
 
 ---
 

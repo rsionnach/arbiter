@@ -21,7 +21,9 @@ async def tracker(store):
     return StoreTrendTracker(store)
 
 
-def _make_score(eval_id: str, dims: dict[str, float], confidence: float = 0.8) -> QualityScore:
+def _make_score(
+    eval_id: str, dims: dict[str, float], confidence: float = 0.8, cost_usd: float | None = None
+) -> QualityScore:
     return QualityScore(
         eval_id=eval_id,
         agent_name="agent-a",
@@ -29,6 +31,7 @@ def _make_score(eval_id: str, dims: dict[str, float], confidence: float = 0.8) -
         dimensions=dims,
         confidence=confidence,
         evaluator_model="test",
+        cost_usd=cost_usd,
     )
 
 
@@ -60,3 +63,31 @@ async def test_multiple_scores_averaged(store, tracker):
     assert window.evaluation_count == 2
     assert window.dimension_averages["correctness"] == pytest.approx(0.7)
     assert window.confidence_mean == pytest.approx(0.8)
+
+
+@pytest.mark.asyncio
+async def test_reversal_rate_computed(store, tracker):
+    await store.save_score(_make_score("e1", {"correctness": 0.8}))
+    await store.save_score(_make_score("e2", {"correctness": 0.6}))
+    await store.save_override("e1", {"correctness": 0.5}, "reviewer")
+
+    window = await tracker.compute_window("agent-a", 7)
+    assert window.reversal_rate == pytest.approx(0.5)  # 1 of 2 overridden
+
+
+@pytest.mark.asyncio
+async def test_reversal_rate_no_overrides(store, tracker):
+    await store.save_score(_make_score("e1", {"correctness": 0.8}))
+
+    window = await tracker.compute_window("agent-a", 7)
+    assert window.reversal_rate == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_cost_aggregation(store, tracker):
+    await store.save_score(_make_score("e1", {"x": 0.5}, cost_usd=0.02))
+    await store.save_score(_make_score("e2", {"x": 0.5}, cost_usd=0.04))
+
+    window = await tracker.compute_window("agent-a", 7)
+    assert window.total_cost_usd == pytest.approx(0.06)
+    assert window.avg_cost_per_eval == pytest.approx(0.03)

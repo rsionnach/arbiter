@@ -95,3 +95,25 @@ async def test_set_autonomy_upsert(store):
     await store.set_autonomy("agent-a", "suspended", "governance")
     level = await store.get_autonomy("agent-a")
     assert level == "suspended"
+
+
+@pytest.mark.asyncio
+async def test_get_overrides_filtered_by_agent(store):
+    await store.save_score(_make_score(eval_id="e1", agent="alice"))
+    await store.save_score(_make_score(eval_id="e2", agent="bob"))
+
+    await store.save_override("e1", {"correctness": 0.5}, "reviewer")
+    await store.save_override("e2", {"correctness": 0.3}, "reviewer")
+
+    since = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    alice_overrides = await store.get_overrides(since, agent_name="alice")
+    assert len(alice_overrides) == 1
+    assert alice_overrides[0]["eval_id"] == "e1"
+
+    bob_overrides = await store.get_overrides(since, agent_name="bob")
+    assert len(bob_overrides) == 1
+    assert bob_overrides[0]["eval_id"] == "e2"
+
+    all_overrides = await store.get_overrides(since)
+    assert len(all_overrides) == 2

@@ -1,10 +1,11 @@
 """Tests for ModelEvaluator — prompt construction + response parsing."""
 
 import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from arbiter.pipeline.evaluator import ModelEvaluator
+from arbiter.pipeline.evaluator import ModelEvaluator, _ModelResponse, _compute_cost
 from arbiter.types import AgentOutput
 
 
@@ -73,7 +74,31 @@ def test_parse_response_invalid_json(evaluator, sample_output):
         evaluator.parse_response("not json", sample_output)
 
 
+def test_compute_cost_known_model():
+    cost = _compute_cost("claude-sonnet-4-20250514", 1000, 500)
+    # (1000 * 3.0 + 500 * 15.0) / 1_000_000 = (3000 + 7500) / 1_000_000 = 0.0105
+    assert cost == pytest.approx(0.0105)
+
+
+def test_compute_cost_unknown_model():
+    cost = _compute_cost("unknown-model", 1000, 500)
+    assert cost is None
+
+
 @pytest.mark.asyncio
-async def test_call_model_raises(evaluator, sample_output):
-    with pytest.raises(NotImplementedError):
-        await evaluator.evaluate(sample_output, ["correctness"])
+async def test_evaluate_with_mock_client(evaluator, sample_output):
+    response_json = json.dumps({
+        "dimensions": {
+            "correctness": {"score": 0.9, "reasoning": "Good"},
+        },
+        "confidence": 0.85,
+    })
+
+    mock_response = _ModelResponse(text=response_json, input_tokens=100, output_tokens=50)
+
+    with patch.object(evaluator, "_call_model", new_callable=AsyncMock, return_value=mock_response):
+        score = await evaluator.evaluate(sample_output, ["correctness"])
+
+    assert score.agent_name == "agent-a"
+    assert score.dimensions["correctness"] == pytest.approx(0.9)
+    assert score.confidence == pytest.approx(0.85)

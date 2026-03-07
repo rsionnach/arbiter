@@ -16,6 +16,8 @@ class AgentConfig:
     name: str
     adapter: str = "webhook"
     dimensions: list[str] | None = None
+    manifest: str | None = None
+    adapter_config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -44,12 +46,22 @@ class GovernanceConfig:
 
 
 @dataclass
+class DetectionConfig:
+    """Configuration for degradation detection thresholds."""
+
+    max_reversal_rate: float = 0.3
+    min_dimension_scores: dict[str, float] = field(default_factory=dict)
+    min_confidence: float = 0.5
+
+
+@dataclass
 class ArbiterConfig:
     """Top-level Arbiter configuration matching arbiter.yaml shape."""
 
     evaluator: EvaluatorConfig = field(default_factory=EvaluatorConfig)
     store: StoreConfig = field(default_factory=StoreConfig)
     governance: GovernanceConfig = field(default_factory=GovernanceConfig)
+    detection: DetectionConfig = field(default_factory=DetectionConfig)
     dimensions: list[str] = field(default_factory=lambda: ["correctness", "completeness", "style"])
     agents: list[AgentConfig] = field(default_factory=list)
 
@@ -63,16 +75,24 @@ def load_config(path: Path) -> ArbiterConfig:
     evaluator = EvaluatorConfig(**raw["evaluator"]) if "evaluator" in raw else EvaluatorConfig()
     store = StoreConfig(**raw["store"]) if "store" in raw else StoreConfig()
     governance = GovernanceConfig(**raw["governance"]) if "governance" in raw else GovernanceConfig()
+    detection = DetectionConfig(**raw["detection"]) if "detection" in raw else DetectionConfig()
     dimensions = raw.get("dimensions", ["correctness", "completeness", "style"])
 
     agents = []
     for agent_data in raw.get("agents", []):
-        agents.append(AgentConfig(**agent_data))
+        agents.append(AgentConfig(
+            name=agent_data["name"],
+            adapter=agent_data.get("adapter", "webhook"),
+            dimensions=agent_data.get("dimensions"),
+            manifest=agent_data.get("manifest"),
+            adapter_config=agent_data.get("adapter_config", {}),
+        ))
 
     return ArbiterConfig(
         evaluator=evaluator,
         store=store,
         governance=governance,
+        detection=detection,
         dimensions=dimensions,
         agents=agents,
     )

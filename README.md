@@ -9,7 +9,7 @@ If you're running multiple AI agents in production, you're asking the same quest
 
 The Arbiter evaluates AI agent output quality, tracks per-agent quality trends over rolling windows, detects quality degradation, measures its own accuracy through self-calibration, and governs agent autonomy based on measured performance. It works with any agent system (not just a specific framework) and any model provider (swap Claude for Gemini or a local model and the transport doesn't change, only the judgment quality changes, which is itself measurable).
 
-This project is in the architecture phase. The design is documented below, and implementation has not yet started.
+The core is fully implemented: evaluation pipeline, score store, trend tracking, degradation detection, self-calibration with judgment SLOs, governance with a one-way safety ratchet, OTel instrumentation, cost tracking, CLI subcommands, OpenSRM manifest integration, and three adapters (webhook, GasTown, Devin).
 
 ---
 
@@ -157,9 +157,9 @@ The Arbiter also works with simple configuration files for teams that don't use 
 
 The Arbiter connects to different agent systems through adapters. Each adapter translates a specific system's output format into the Arbiter's evaluation pipeline.
 
-- **GasTown adapter:** Connects to GasTown's merge pipeline, receives per-worker output for quality evaluation
+- **GasTown adapter:** Polls bd for quality-review-result wisps from the Refinery merge pipeline, converts to AgentOutput
 - **Generic webhook adapter:** Accepts agent output via HTTP webhook with a simple JSON schema, works with any system that can make HTTP calls
-- **Devin adapter:** Connects to Devin's task output for evaluation (planned)
+- **Devin adapter:** Polls Devin REST API (`GET /v1/sessions`) for completed sessions and evaluates their output
 
 Building a custom adapter is straightforward: implement the input interface to receive agent output, and the Arbiter handles evaluation, scoring, trending, and governance from there.
 
@@ -233,7 +233,17 @@ The Arbiter concept was proven inside GasTown as the Guardian, a Deacon plugin t
 
 ## Status
 
-The Arbiter core is implemented: evaluation pipeline, SQLite score store, trend tracking, override-based calibration, and error-budget governance with a one-way safety ratchet. The model evaluator constructs prompts and parses responses but requires an SDK dependency (e.g. `anthropic`) to be wired for live model calls. Judgment SLOs (reversal rate targets, windowed compliance) are a planned next layer on top of the existing calibration infrastructure.
+The Arbiter is fully implemented:
+
+- **Pipeline**: Evaluation pipeline with live Anthropic SDK calls, cost tracking, and OTel instrumentation
+- **Store**: SQLite score store with scores, overrides, autonomy state, and governance log
+- **Trends**: Rolling window aggregation with dimension averages, reversal rate, confidence mean, cost stats
+- **Detection**: Threshold-based degradation detector with alerts for reversal rate, dimension scores, and confidence
+- **Calibration**: MAE-based override calibration + judgment SLO checker (false accept rate, precision, recall, windowed compliance)
+- **Governance**: Error-budget governance with one-way safety ratchet
+- **Adapters**: Webhook (generic), GasTown (bd wisps), Devin (REST API)
+- **CLI**: Subcommands — `serve`, `evaluate`, `status`, `calibrate`, `overrides list`, `governance show/restore`
+- **OpenSRM**: Manifest loader for judgment SLO thresholds
 
 ---
 

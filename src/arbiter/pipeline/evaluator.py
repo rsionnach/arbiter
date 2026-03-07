@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -21,6 +22,32 @@ class Evaluator(Protocol):
     async def evaluate(self, output: AgentOutput, dimensions: list[str]) -> QualityScore: ...
 
 
+@dataclass(frozen=True)
+class _ModelResponse:
+    """Internal response container from model call."""
+
+    text: str
+    input_tokens: int
+    output_tokens: int
+
+
+# Known model pricing per million tokens (input, output) in USD
+_MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "claude-sonnet-4-20250514": (3.0, 15.0),
+    "claude-haiku-4-20250414": (0.80, 4.0),
+    "claude-opus-4-20250514": (15.0, 75.0),
+}
+
+
+def _compute_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    """Compute cost in USD from token counts. Returns None for unknown models."""
+    pricing = _MODEL_PRICING.get(model)
+    if pricing is None:
+        return None
+    input_price, output_price = pricing
+    return (input_tokens * input_price + output_tokens * output_price) / 1_000_000
+
+
 class ModelEvaluator:
     """Evaluator that delegates quality judgment to a language model.
 
@@ -32,6 +59,15 @@ class ModelEvaluator:
     def __init__(self, model: str, max_tokens: int = 4096) -> None:
         self._model = model
         self._max_tokens = max_tokens
+        self._client = None
+
+    def _get_client(self):
+        """Lazy-init the Anthropic client."""
+        if self._client is None:
+            import anthropic
+
+            self._client = anthropic.AsyncAnthropic()
+        return self._client
 
     def build_prompt(self, output: AgentOutput, dimensions: list[str]) -> str:
         """Construct the evaluation prompt. This IS the deliverable — prompt engineering."""
@@ -95,14 +131,26 @@ Respond with valid JSON only:
             evaluator_model=self._model,
         )
 
-    async def _call_model(self, prompt: str) -> str:
-        """Call the language model. Not implemented — no SDK dependency yet."""
-        raise NotImplementedError(
-            "Model calling requires an SDK dependency (e.g. anthropic). "
-            "Inject a callable or subclass this method."
+    async def _call_model(self, prompt: str) -> _ModelResponse:
+        """Call the Anthropic API and return text + token counts."""
+        client = self._get_client()
+        response = await client.messages.create(
+            model=self._model,
+            max_tokens=self._max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text
+        return _ModelResponse(
+            text=text,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
         )
 
     async def evaluate(self, output: AgentOutput, dimensions: list[str]) -> QualityScore:
         prompt = self.build_prompt(output, dimensions)
-        raw_response = await self._call_model(prompt)
-        return self.parse_response(raw_response, output)
+        model_response = await self._call_model(prompt)
+        score = self.parse_response(model_response.text, output)
+        cost = _compute_cost(self._model, model_response.input_tokens, model_response.output_tokens)
+        if cost is not None:
+            score = replace(score, cost_usd=cost)
+        return score
