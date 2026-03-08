@@ -2,6 +2,6 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "server",
-  "dolt_database": "ar",
-  "project_id": "6e8dc05b-1403-4933-a1f5-dd37a2765164"
+  "dolt_database": "arbiter",
+  "project_id": "86eae9db-4288-491b-9dfc-7994f4fdf2b9"
 }
