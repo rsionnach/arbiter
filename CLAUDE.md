@@ -117,6 +117,7 @@ Reference targets are guidance, not enforced thresholds. Enforced targets come f
 
 **JudgmentSLOChecker implementation details:**
 - Metric computation is split into static helpers: `_compute_reversal_rate`, `_compute_false_accept_rate`, `_compute_precision`, `_compute_recall`, `_compute_mae`.
+- `false_accept_rate`, `precision`, and `recall` require a `quality_threshold` from the manifest. When no manifest or no `quality_threshold` is declared, these metrics are `None` (fail open — no quality classification without operator-declared policy).
 - After computing the report, `check()` calls `emit_calibration_report_event` directly — the OTel event is fired as part of every `check()` call, not only on manifest violations.
 
 ### Governance Engine
