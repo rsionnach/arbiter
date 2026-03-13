@@ -25,11 +25,22 @@ class SQLiteScoreStore:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._lock = threading.Lock()
         self._apply_schema()
+        self._migrate_verdict_id()
 
     def _apply_schema(self) -> None:
         schema = _SCHEMA_PATH.read_text()
         with self._lock:
             self._conn.executescript(schema)
+
+    def _migrate_verdict_id(self) -> None:
+        """Add verdict_id column to evaluations if not present."""
+        with self._lock:
+            try:
+                self._conn.execute("ALTER TABLE evaluations ADD COLUMN verdict_id TEXT")
+                self._conn.commit()
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e):
+                    raise
 
     def _save_score_sync(self, score: QualityScore) -> None:
         with self._lock:
@@ -56,6 +67,19 @@ class SQLiteScoreStore:
 
     async def save_score(self, score: QualityScore) -> None:
         await asyncio.to_thread(self._save_score_sync, score)
+
+    def _set_verdict_id_sync(self, eval_id: str, verdict_id: str) -> None:
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE evaluations SET verdict_id = ? WHERE eval_id = ?",
+                (verdict_id, eval_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError(f"Cannot set verdict_id on non-existent evaluation: {eval_id}")
+            self._conn.commit()
+
+    async def set_verdict_id(self, eval_id: str, verdict_id: str) -> None:
+        await asyncio.to_thread(self._set_verdict_id_sync, eval_id, verdict_id)
 
     def _get_scores_sync(
         self, agent_name: str, since: datetime, limit: int
