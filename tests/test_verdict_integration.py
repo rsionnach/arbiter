@@ -278,3 +278,68 @@ class TestVerdictEmission:
     @pytest.mark.asyncio
     async def test_default_approve_threshold_value(self):
         assert DEFAULT_APPROVE_THRESHOLD == 0.5
+
+
+class TestOverrideResolution:
+    """Tests for override to verdict resolution in SQLiteScoreStore."""
+
+    @pytest_asyncio.fixture
+    async def verdict_store(self, tmp_path):
+        vs = SQLiteVerdictStore(str(tmp_path / "verdicts.db"))
+        yield vs
+        vs.close()
+
+    @pytest_asyncio.fixture
+    async def score_store(self, tmp_path, verdict_store):
+        s = SQLiteScoreStore(tmp_path / "score.db", verdict_store=verdict_store)
+        yield s
+        s.close()
+
+    @pytest.mark.asyncio
+    async def test_override_resolves_verdict(self, score_store, verdict_store):
+        """Override should resolve the linked verdict as overridden."""
+        # Save score
+        await score_store.save_score(_make_score())
+
+        # Create and store verdict, link it
+        verdict = await asyncio.to_thread(
+            verdict_create,
+            subject={"type": "agent_output", "ref": "t1", "agent": "agent-a",
+                     "summary": "Test evaluation"},
+            judgment={"action": "approve", "confidence": 0.85, "score": 0.8},
+            producer={"system": "arbiter", "model": "test-model"},
+        )
+        await asyncio.to_thread(verdict_store.put, verdict)
+        await score_store.set_verdict_id("e1", verdict.id)
+
+        # Override
+        await score_store.save_override("e1", {"correctness": 0.3}, "human-reviewer")
+
+        # Verdict should be resolved
+        resolved = verdict_store.get(verdict.id)
+        assert resolved.outcome.status == "overridden"
+        assert resolved.outcome.override.by == "human-reviewer"
+
+    @pytest.mark.asyncio
+    async def test_override_without_verdict_id_still_works(self, score_store):
+        """Override on pre-integration data (no verdict_id) should work normally."""
+        await score_store.save_score(_make_score())
+        # No verdict_id set — simulates pre-integration data
+        await score_store.save_override("e1", {"correctness": 0.3}, "reviewer")
+
+        since = datetime.now(timezone.utc) - timedelta(hours=1)
+        overrides = await score_store.get_overrides(since)
+        assert len(overrides) == 1
+
+    @pytest.mark.asyncio
+    async def test_score_store_without_verdict_store(self, tmp_path):
+        """SQLiteScoreStore without verdict_store should work identically to before."""
+        s = SQLiteScoreStore(tmp_path / "test.db")
+        try:
+            await s.save_score(_make_score())
+            await s.save_override("e1", {"correctness": 0.3}, "reviewer")
+            since = datetime.now(timezone.utc) - timedelta(hours=1)
+            overrides = await s.get_overrides(since)
+            assert len(overrides) == 1
+        finally:
+            s.close()
