@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import argparse as _argparse
 import asyncio
+import contextlib
+import io
+import json
 import textwrap
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -14,6 +18,7 @@ import pytest_asyncio
 from verdict import SQLiteVerdictStore, AccuracyFilter, VerdictFilter, create as verdict_create
 
 from arbiter.calibration.verdict_calibration import VerdictCalibration
+from arbiter.cli import cmd_calibrate
 from arbiter.config import ArbiterConfig, VerdictConfig, load_config
 from arbiter.pipeline.router import DEFAULT_APPROVE_THRESHOLD, PipelineRouter
 from arbiter.store.sqlite import SQLiteScoreStore
@@ -411,3 +416,84 @@ class TestVerdictCalibration:
 
         assert report.total == 3
         assert report.confirmation_rate == pytest.approx(1.0)
+
+
+class TestCalibrateVerdictFlag:
+    """Tests for --verdict flag on calibrate subcommand."""
+
+    @pytest_asyncio.fixture
+    async def verdict_db(self, tmp_path):
+        """Create a seeded verdict store and return the db path."""
+        db_path = str(tmp_path / "verdicts.db")
+        vs = SQLiteVerdictStore(db_path)
+        # Seed: 4 confirmed, 1 overridden
+        for i in range(5):
+            v = verdict_create(
+                subject={
+                    "type": "agent_output",
+                    "ref": f"t-{i}",
+                    "agent": "a",
+                    "summary": f"Test {i}",
+                },
+                judgment={
+                    "action": "approve",
+                    "confidence": 0.9,
+                    "score": 0.8,
+                },
+                producer={"system": "arbiter", "model": "test"},
+            )
+            vs.put(v)
+            if i == 0:
+                vs.resolve(v.id, "overridden", override={"by": "human"})
+            else:
+                vs.resolve(v.id, "confirmed")
+        vs.close()
+        return db_path
+
+    def _make_config_file(self, tmp_path, verdict_store_path):
+        """Write a minimal arbiter.yaml with verdict config."""
+        cfg = tmp_path / "arbiter.yaml"
+        cfg.write_text(
+            f"evaluator:\n  model: test\n"
+            f"store:\n  path: {tmp_path / 'arbiter.db'}\n"
+            f"verdict:\n  store:\n    path: {verdict_store_path}\n"
+        )
+        return cfg
+
+    def test_calibrate_verdict_flag_prints_report(self, tmp_path, verdict_db):
+        cfg_file = self._make_config_file(tmp_path, verdict_db)
+
+        args = _argparse.Namespace(
+            config=cfg_file,
+            agent=None,
+            window_days=30,
+            verdict=True,
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_calibrate(args)
+        output = buf.getvalue()
+        result = json.loads(output)
+
+        assert result["total"] == 5
+        assert result["total_resolved"] == 5
+        assert result["confirmation_rate"] == pytest.approx(0.8)
+        assert result["override_rate"] == pytest.approx(0.2)
+
+    def test_calibrate_verdict_flag_no_config_errors(self, tmp_path):
+        """--verdict without verdict config section should print error."""
+        cfg = tmp_path / "arbiter.yaml"
+        cfg.write_text("evaluator:\n  model: test\n")
+        args = _argparse.Namespace(
+            config=cfg,
+            agent=None,
+            window_days=30,
+            verdict=True,
+        )
+
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            with pytest.raises(SystemExit):
+                cmd_calibrate(args)
+        assert "verdict" in buf.getvalue().lower()

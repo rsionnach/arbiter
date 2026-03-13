@@ -199,6 +199,41 @@ def cmd_status(args: argparse.Namespace) -> None:
 def cmd_calibrate(args: argparse.Namespace) -> None:
     """Run calibration report."""
     config = _load_config(args)
+
+    if getattr(args, "verdict", False):
+        # Verdict-based calibration (system-wide)
+        if config.verdict is None:
+            print(
+                "Error: --verdict requires a 'verdict' section in arbiter.yaml",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        from verdict import SQLiteVerdictStore
+        from arbiter.calibration.verdict_calibration import VerdictCalibration
+
+        verdict_store = SQLiteVerdictStore(config.verdict.store_path)
+        cal = VerdictCalibration(verdict_store)
+
+        async def _run():
+            return await cal.check(window_days=args.window_days)
+
+        report = asyncio.run(_run())
+        verdict_store.close()
+        result = {
+            "producer": report.producer,
+            "total": report.total,
+            "total_resolved": report.total_resolved,
+            "confirmation_rate": report.confirmation_rate,
+            "override_rate": report.override_rate,
+            "partial_rate": report.partial_rate,
+            "pending_rate": report.pending_rate,
+            "mean_confidence_on_confirmed": report.mean_confidence_on_confirmed,
+            "mean_confidence_on_overridden": report.mean_confidence_on_overridden,
+        }
+        print(json.dumps(result, indent=2))
+        return
+
     store = _build_store(config)
 
     async def _run():
@@ -324,6 +359,10 @@ def main() -> None:
     cal_parser = subparsers.add_parser("calibrate", help="Run calibration report")
     cal_parser.add_argument("--window-days", type=int, default=30)
     cal_parser.add_argument("--agent", type=str, default=None)
+    cal_parser.add_argument(
+        "--verdict", action="store_true", default=False,
+        help="Use verdict-based calibration (system-wide)",
+    )
 
     # overrides
     ov_parser = subparsers.add_parser("overrides", help="Override management")
