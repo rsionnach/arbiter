@@ -13,6 +13,7 @@ import pytest_asyncio
 
 from verdict import SQLiteVerdictStore, AccuracyFilter, VerdictFilter, create as verdict_create
 
+from arbiter.calibration.verdict_calibration import VerdictCalibration
 from arbiter.config import ArbiterConfig, VerdictConfig, load_config
 from arbiter.pipeline.router import DEFAULT_APPROVE_THRESHOLD, PipelineRouter
 from arbiter.store.sqlite import SQLiteScoreStore
@@ -343,3 +344,70 @@ class TestOverrideResolution:
             assert len(overrides) == 1
         finally:
             s.close()
+
+
+class TestVerdictCalibration:
+    """Tests for VerdictCalibration — system-wide accuracy via verdict store."""
+
+    @pytest_asyncio.fixture
+    async def verdict_store(self, tmp_path):
+        vs = SQLiteVerdictStore(str(tmp_path / "verdicts.db"))
+        yield vs
+        vs.close()
+
+    def _seed_verdicts(self, verdict_store, count=5, overridden_count=1):
+        """Create verdicts: confirmed + overridden to given counts."""
+        for i in range(count):
+            v = verdict_create(
+                subject={
+                    "type": "agent_output",
+                    "ref": f"task-{i}",
+                    "agent": "agent-a",
+                    "summary": f"Test evaluation {i}",
+                },
+                judgment={
+                    "action": "approve",
+                    "confidence": 0.9,
+                    "score": 0.8,
+                },
+                producer={"system": "arbiter", "model": "test-model"},
+            )
+            verdict_store.put(v)
+            if i < overridden_count:
+                verdict_store.resolve(
+                    v.id, "overridden", override={"by": "human"},
+                )
+            else:
+                verdict_store.resolve(v.id, "confirmed")
+
+    @pytest.mark.asyncio
+    async def test_check_returns_accuracy_report(self, verdict_store):
+        self._seed_verdicts(verdict_store, count=5, overridden_count=1)
+        cal = VerdictCalibration(verdict_store)
+        report = await cal.check()
+
+        assert report.total == 5
+        assert report.total_resolved == 5
+        # 4 confirmed / 5 resolved = 0.8
+        assert report.confirmation_rate == pytest.approx(0.8)
+        # 1 overridden / 5 resolved = 0.2
+        assert report.override_rate == pytest.approx(0.2)
+
+    @pytest.mark.asyncio
+    async def test_check_empty_store(self, verdict_store):
+        cal = VerdictCalibration(verdict_store)
+        report = await cal.check()
+
+        assert report.total == 0
+        assert report.total_resolved == 0
+        assert report.confirmation_rate == 0.0
+        assert report.override_rate == 0.0
+
+    @pytest.mark.asyncio
+    async def test_check_custom_window(self, verdict_store):
+        self._seed_verdicts(verdict_store, count=3, overridden_count=0)
+        cal = VerdictCalibration(verdict_store)
+        report = await cal.check(window_days=1)
+
+        assert report.total == 3
+        assert report.confirmation_rate == pytest.approx(1.0)
