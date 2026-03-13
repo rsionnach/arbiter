@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import textwrap
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
 
+from verdict import SQLiteVerdictStore, AccuracyFilter, VerdictFilter, create as verdict_create
+
 from arbiter.config import ArbiterConfig, VerdictConfig, load_config
+from arbiter.pipeline.router import DEFAULT_APPROVE_THRESHOLD, PipelineRouter
 from arbiter.store.sqlite import SQLiteScoreStore
 from arbiter.types import QualityScore
 
@@ -132,3 +137,144 @@ class TestSchemaMigration:
         s2 = SQLiteScoreStore(db)
         s2.close()
         # No exception means migration is idempotent
+
+
+class TestVerdictEmission:
+    """Tests for verdict creation in PipelineRouter."""
+
+    @pytest_asyncio.fixture
+    async def verdict_store(self, tmp_path):
+        vs = SQLiteVerdictStore(str(tmp_path / "verdicts.db"))
+        yield vs
+        vs.close()
+
+    @pytest_asyncio.fixture
+    async def score_store(self, tmp_path):
+        s = SQLiteScoreStore(tmp_path / "score.db")
+        yield s
+        s.close()
+
+    def _make_pipeline(self, score_store, verdict_store=None, threshold=None):
+        """Build a PipelineRouter with mock adapter/evaluator for testing."""
+        adapter = AsyncMock()
+        evaluator_mock = AsyncMock()
+        tracker = AsyncMock()
+        tracker.compute_window = AsyncMock()
+
+        return PipelineRouter(
+            adapter=adapter,
+            evaluator=evaluator_mock,
+            store=score_store,
+            tracker=tracker,
+            dimensions=["correctness", "style"],
+            verdict_store=verdict_store,
+            approve_threshold=threshold,
+        )
+
+    async def _run_single(self, router, score):
+        """Configure adapter to yield one output, evaluator to return score, run pipeline."""
+        output = MagicMock()
+        output.agent_name = score.agent_name
+
+        async def _receive():
+            yield output
+
+        router._adapter.receive = _receive
+        router._evaluator.evaluate = AsyncMock(return_value=score)
+        await router.run()
+
+    @pytest.mark.asyncio
+    async def test_verdict_created_after_scoring(self, score_store, verdict_store):
+        router = self._make_pipeline(score_store, verdict_store)
+        score = _make_score(dimensions={"correctness": 0.8, "style": 0.6})
+        await self._run_single(router, score)
+
+        # Verdict should be in verdict store
+        verdicts = verdict_store.query(VerdictFilter(producer_system="arbiter", limit=10))
+        assert len(verdicts) == 1
+        v = verdicts[0]
+        assert v.subject.type == "agent_output"
+        assert v.subject.ref == "t1"
+        assert v.subject.agent == "agent-a"
+        assert v.judgment.action == "approve"  # avg 0.7 >= 0.5
+        assert v.judgment.confidence == pytest.approx(0.85)
+        assert v.judgment.score == pytest.approx(0.7)
+        assert v.judgment.dimensions == {"correctness": 0.8, "style": 0.6}
+        assert v.subject.summary == "Evaluation of agent-a: t1"
+        assert v.producer.system == "arbiter"
+        assert v.producer.model == "test-model"
+        assert v.metadata.cost_currency == pytest.approx(0.01)
+
+    @pytest.mark.asyncio
+    async def test_verdict_id_written_to_evaluations(self, score_store, verdict_store):
+        router = self._make_pipeline(score_store, verdict_store)
+        score = _make_score()
+        await self._run_single(router, score)
+
+        # verdict_id should be set on the evaluations row
+        with score_store._lock:
+            row = score_store._conn.execute(
+                "SELECT verdict_id FROM evaluations WHERE eval_id = ?", ("e1",)
+            ).fetchone()
+        assert row["verdict_id"] is not None
+        assert row["verdict_id"].startswith("vrd-")
+
+    @pytest.mark.asyncio
+    async def test_approve_threshold_boundary_approve(self, score_store, verdict_store):
+        """Score exactly at threshold -> approve."""
+        router = self._make_pipeline(score_store, verdict_store)
+        score = _make_score(dimensions={"d1": 0.5})
+        await self._run_single(router, score)
+
+        verdicts = verdict_store.query(VerdictFilter(producer_system="arbiter", limit=10))
+        assert verdicts[0].judgment.action == "approve"
+
+    @pytest.mark.asyncio
+    async def test_approve_threshold_boundary_reject(self, score_store, verdict_store):
+        """Score just below threshold -> reject."""
+        router = self._make_pipeline(score_store, verdict_store)
+        score = _make_score(dimensions={"d1": 0.49})
+        await self._run_single(router, score)
+
+        verdicts = verdict_store.query(VerdictFilter(producer_system="arbiter", limit=10))
+        assert verdicts[0].judgment.action == "reject"
+
+    @pytest.mark.asyncio
+    async def test_custom_threshold(self, score_store, verdict_store):
+        """Custom approve_threshold should be respected."""
+        router = self._make_pipeline(score_store, verdict_store, threshold=0.8)
+        score = _make_score(dimensions={"d1": 0.75})
+        await self._run_single(router, score)
+
+        verdicts = verdict_store.query(VerdictFilter(producer_system="arbiter", limit=10))
+        assert verdicts[0].judgment.action == "reject"  # 0.75 < 0.8
+
+    @pytest.mark.asyncio
+    async def test_no_verdict_when_store_is_none(self, score_store):
+        """When verdict_store is None, pipeline works without creating verdicts."""
+        router = self._make_pipeline(score_store, verdict_store=None)
+        score = _make_score()
+        await self._run_single(router, score)
+
+        # Score still saved
+        since = datetime.now(timezone.utc) - timedelta(hours=1)
+        results = await score_store.get_scores("agent-a", since)
+        assert len(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_verdict_reasoning_formatted(self, score_store, verdict_store):
+        """Reasoning dict should be formatted as semicolon-separated string."""
+        router = self._make_pipeline(score_store, verdict_store)
+        score = _make_score(
+            reasoning={"correctness": "Looks good", "style": "Needs work"}
+        )
+        await self._run_single(router, score)
+
+        verdicts = verdict_store.query(VerdictFilter(producer_system="arbiter", limit=10))
+        reasoning = verdicts[0].judgment.reasoning
+        assert "correctness: Looks good" in reasoning
+        assert "style: Needs work" in reasoning
+
+    @pytest.mark.asyncio
+    async def test_default_approve_threshold_value(self):
+        assert DEFAULT_APPROVE_THRESHOLD == 0.5

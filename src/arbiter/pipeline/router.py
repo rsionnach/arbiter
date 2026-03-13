@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from arbiter.adapters.protocol import Adapter
 from arbiter.detection.protocol import DegradationDetector
 from arbiter.governance.engine import GovernanceEngine
@@ -9,10 +11,13 @@ from arbiter.pipeline.evaluator import Evaluator
 from arbiter.store.protocol import ScoreStore
 from arbiter.telemetry import emit_decision_event
 from arbiter.trends.tracker import TrendTracker
+from verdict import create as verdict_create, VerdictStore as VerdictStoreBase
 
 import logging
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_APPROVE_THRESHOLD = 0.5
 
 
 class PipelineRouter:
@@ -32,6 +37,8 @@ class PipelineRouter:
         governance: GovernanceEngine | None = None,
         detector: DegradationDetector | None = None,
         detection_window_days: int = 7,
+        verdict_store: VerdictStoreBase | None = None,
+        approve_threshold: float | None = None,
     ) -> None:
         self._adapter = adapter
         self._evaluator = evaluator
@@ -41,12 +48,23 @@ class PipelineRouter:
         self._governance = governance
         self._detector = detector
         self._detection_window_days = detection_window_days
+        self._verdict_store = verdict_store
+        self._approve_threshold = (
+            approve_threshold if approve_threshold is not None
+            else DEFAULT_APPROVE_THRESHOLD
+        )
 
     async def run(self) -> None:
         """Process agent outputs through the full pipeline."""
         async for output in self._adapter.receive():
             score = await self._evaluator.evaluate(output, self._dimensions)
             await self._store.save_score(score)
+
+            # Create verdict if verdict store is configured
+            if self._verdict_store is not None:
+                verdict = await self._create_verdict(score)
+                await asyncio.to_thread(self._verdict_store.put, verdict)
+                await self._store.set_verdict_id(score.eval_id, verdict.id)
 
             alerts = None
             if self._detector is not None:
@@ -59,3 +77,38 @@ class PipelineRouter:
 
             if self._governance is not None:
                 await self._governance.check_agent(output.agent_name)
+
+    async def _create_verdict(self, score):
+        """Map QualityScore to a verdict."""
+        avg_score = sum(score.dimensions.values()) / len(score.dimensions)
+
+        reasoning_summary = "; ".join(
+            f"{name}: {reason}" for name, reason in score.reasoning.items()
+        ) if score.reasoning else None
+
+        return await asyncio.to_thread(
+            verdict_create,
+            subject={
+                "type": "agent_output",
+                "ref": score.task_id,
+                "summary": f"Evaluation of {score.agent_name}: {score.task_id}",
+                "agent": score.agent_name,
+            },
+            judgment={
+                "action": (
+                    "approve" if avg_score >= self._approve_threshold
+                    else "reject"
+                ),
+                "confidence": score.confidence,
+                "score": avg_score,
+                "dimensions": score.dimensions,
+                "reasoning": reasoning_summary,
+            },
+            producer={
+                "system": "arbiter",
+                "model": score.evaluator_model,
+            },
+            metadata={
+                "cost_currency": score.cost_usd,
+            },
+        )
