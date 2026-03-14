@@ -2,7 +2,7 @@
 
 Universal quality measurement engine for AI agent output. Evaluates agent output quality, tracks per-agent trends over rolling windows, detects degradation, self-calibrates its own judgment accuracy, and governs agent autonomy based on measured performance.
 
-**Status: fully implemented — pipeline, store, trends, calibration (MAE + judgment SLOs), governance, degradation detector, OTel instrumentation, cost tracking, CLI subcommands, OpenSRM manifest integration, and three adapters (webhook, GasTown, Devin).**
+**Status: fully implemented — pipeline, store, trends, calibration (MAE + judgment SLOs + verdict-based), governance, degradation detector, OTel instrumentation, cost tracking, CLI subcommands, OpenSRM manifest integration, verdict integration (Phase 1), and three adapters (webhook, GasTown, Devin).**
 
 ---
 
@@ -79,6 +79,9 @@ Persists evaluation results with agent identity, timestamp, quality dimensions, 
 - All DB operations are guarded by a `threading.Lock`; async methods use `asyncio.to_thread` to avoid blocking the event loop.
 - `save_override` validates that the `eval_id` exists before writing (raises `ValueError` on unknown id).
 - Call `close()` to release the connection when done.
+- Accepts optional `verdict_store: VerdictStoreBase | None = None`. When set: override triggers `verdict_store.resolve(verdict_id, "overridden")` outside the lock.
+- `set_verdict_id(eval_id, verdict_id)`: async; raises `ValueError` on unknown `eval_id`. Links evaluations row to verdict.
+- `_migrate_verdict_id()`: idempotent `ALTER TABLE evaluations ADD COLUMN verdict_id TEXT`; swallows "duplicate column" `OperationalError`.
 
 ### Trend Tracker
 
@@ -144,40 +147,20 @@ Implemented as ErrorBudgetGovernance. On each `check_agent` call, fetches the ag
 
 ## Verdict Integration
 
-The Arbiter's evaluation output becomes a verdict. Integration is implemented (Phase 1, 2026-03-13). Every evaluation creates a verdict via `PipelineRouter.run()`, every human override resolves the linked verdict, and system-wide accuracy is queryable via `VerdictCalibration` or `arbiter calibrate --verdict`.
+Every evaluation creates a verdict via `PipelineRouter.run()`. Every human override resolves the linked verdict. System-wide accuracy is queryable via `VerdictCalibration` or `arbiter calibrate --verdict`.
 
-**Each evaluation call creates a verdict:**
-```python
-from verdict import create, resolve
-from verdict.models import Producer, Subject, Judgment
+**Integration points:**
+- `PipelineRouter`: after `save_score()`, calls `verdict_create()` then `verdict_store.put()` then `store.set_verdict_id()`. Wrapped in try/except — fail open (logs WARNING, pipeline continues).
+- `SQLiteScoreStore`: after `save_override()`, calls `verdict_store.resolve(verdict_id, "overridden", override={"by": corrector})` outside the threading lock.
+- `VerdictCalibration` (`src/arbiter/calibration/verdict_calibration.py`): strangler fig alongside `JudgmentSLOChecker`. Queries `verdict_store.accuracy(AccuracyFilter(producer_system="arbiter", from_time=...))`. System-wide only — per-agent accuracy deferred to Phase 2+ (AccuracyFilter does not support filtering by subject.agent).
 
-v = create(
-    subject={"type": "agent_output", "agent": agent_name, "ref": diff_ref,
-             "summary": diff_summary, "content_hash": hash_of_input},
-    judgment={"action": "approve", "score": evaluation_score,
-              "confidence": evaluation_confidence, "dimensions": dimension_scores,
-              "reasoning": evaluation_reasoning},
-    producer={"system": "arbiter", "model": model_used, "prompt_version": prompt_version},
-)
-store.put(v)
-```
-
-**When a human overrides:**
-```python
-resolve(v, status="overridden", override={"by": "human:" + human_id,
-        "action": corrected_action, "reasoning": why_overrode})
-```
-
-**Self-calibration becomes:**
-`verdict.accuracy(AccuracyFilter(producer_system="arbiter"))` — replaces the existing calibration state. False accept rate = override rate on verdicts where `judgment.action == "approve"`. Precision = confirmation rate on verdicts where Arbiter flagged issues.
-
-**Verdict config (to add):**
-```yaml
-verdict:
-  store:
-    backend: sqlite
-    path: verdicts.db
-```
+**Verdict shape produced by Arbiter:**
+- `subject.type`: always `"agent_output"` | `subject.ref`: task_id | `subject.agent`: agent_name
+- `judgment.action`: `"approve"` if avg dimension score >= `approve_threshold` else `"reject"`
+- `judgment.score`: mean of all dimension scores | `judgment.dimensions`: per-dimension dict
+- `judgment.reasoning`: semicolon-separated string from reasoning dict
+- `producer.system`: always `"arbiter"` | `producer.model`: evaluator model name
+- `DEFAULT_APPROVE_THRESHOLD = 0.5` (configurable via `PipelineRouter(approve_threshold=...)`)
 
 ---
 
@@ -262,6 +245,11 @@ agents:
     adapter_config:
       api_key_env: DEVIN_API_KEY
       poll_interval: 30
+
+# Optional — enables verdict integration. Absent = no verdict ops (fully backwards-compat).
+verdict:
+  store:
+    path: verdicts.db
 ```
 
 **Config validation:** `load_config` raises `ValueError` if any top-level section (e.g. `evaluator`, `store`) is not a YAML mapping, or if any entry in `agents:` is not a mapping or is missing the required `name` field. Default dimensions when `dimensions:` is omitted: `["correctness", "completeness", "safety"]`.
@@ -277,7 +265,7 @@ agents:
 | `serve` | Start the full evaluation pipeline (adapter → evaluator → store → governance). Only the first agent in `agents:` is wired; warns to stderr if more than one is configured. |
 | `evaluate [file] --agent-name A [--task-id T] [--output-type T]` | One-shot evaluation from positional file path or stdin; prints JSON result |
 | `status <agent_name> [--window-days N]` | Print trend window + autonomy level as JSON (agent_name is positional) |
-| `calibrate [--agent A] [--window-days N]` | MAE report (all agents) or SLO compliance report (per agent with manifest) |
+| `calibrate [--agent A] [--window-days N] [--verdict]` | MAE report (all agents), SLO compliance report (per agent with manifest), or verdict-based accuracy report (`--verdict`; requires `verdict:` section in config) |
 | `overrides list [--agent A] [--days N]` | List recent human overrides as JSON (`list` is a required sub-subcommand) |
 | `governance show <agent_name>` | Print current autonomy level (agent_name is positional) |
 | `governance restore <agent_name> <level> --approver P` | Restore autonomy; agent_name and level are positional, --approver is required (safety ratchet) |
