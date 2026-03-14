@@ -600,6 +600,76 @@ class TestEndToEndFeedbackLoop:
         assert cal_report.override_rate == pytest.approx(1 / 3, abs=0.01)
 
 
+class TestOverrideCreateCLI:
+    """Tests for `arbiter overrides create` CLI subcommand."""
+
+    def _seed_score(self, tmp_path):
+        """Create a store with one score and return (store, config_path)."""
+        store = SQLiteScoreStore(tmp_path / "arbiter.db")
+        score = _make_score(eval_id="eval-1", agent="coder", task="pr-1")
+        asyncio.run(store.save_score(score))
+
+        cfg = tmp_path / "arbiter.yaml"
+        cfg.write_text(
+            f"evaluator:\n  model: test\n"
+            f"store:\n  path: {tmp_path / 'arbiter.db'}\n"
+        )
+        store.close()
+        return cfg
+
+    def test_override_create_saves_and_prints(self, tmp_path):
+        from arbiter.cli import cmd_overrides_create
+
+        cfg = self._seed_score(tmp_path)
+        args = _argparse.Namespace(
+            config=cfg,
+            eval_id="eval-1",
+            corrector="human:rob",
+            dimension=["correctness=0.4"],
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_overrides_create(args)
+
+        result = json.loads(buf.getvalue())
+        assert result["eval_id"] == "eval-1"
+        assert result["corrector"] == "human:rob"
+        assert result["corrected_dimensions"] == {"correctness": 0.4}
+
+    def test_override_create_multiple_dimensions(self, tmp_path):
+        from arbiter.cli import cmd_overrides_create
+
+        cfg = self._seed_score(tmp_path)
+        args = _argparse.Namespace(
+            config=cfg,
+            eval_id="eval-1",
+            corrector="human:rob",
+            dimension=["correctness=0.4", "style=0.2"],
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_overrides_create(args)
+
+        result = json.loads(buf.getvalue())
+        assert result["corrected_dimensions"] == {"correctness": 0.4, "style": 0.2}
+
+    def test_override_create_bad_dimension_format(self, tmp_path):
+        from arbiter.cli import cmd_overrides_create
+
+        cfg = self._seed_score(tmp_path)
+        args = _argparse.Namespace(
+            config=cfg,
+            eval_id="eval-1",
+            corrector="human:rob",
+            dimension=["bad-format"],
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            with pytest.raises(SystemExit):
+                cmd_overrides_create(args)
+        assert "dimension" in buf.getvalue().lower()
+
+
 class TestCLIVerdictWiring:
     """Tests that CLI wires verdict store when config has verdict section."""
 

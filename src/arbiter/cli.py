@@ -271,6 +271,34 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
     print(json.dumps(result, indent=2))
 
 
+def cmd_overrides_create(args: argparse.Namespace) -> None:
+    """Create a human override for an evaluation."""
+    config = _load_config(args)
+    store = _build_store(config)
+
+    corrected_dimensions: dict[str, float] = {}
+    for d in args.dimension:
+        if "=" not in d:
+            print(
+                f"Error: dimension must be name=score (got '{d}')",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        name, val = d.split("=", 1)
+        corrected_dimensions[name] = float(val)
+
+    async def _run():
+        await store.save_override(args.eval_id, corrected_dimensions, args.corrector)
+
+    asyncio.run(_run())
+    result = {
+        "eval_id": args.eval_id,
+        "corrector": args.corrector,
+        "corrected_dimensions": corrected_dimensions,
+    }
+    print(json.dumps(result, indent=2))
+
+
 def cmd_overrides_list(args: argparse.Namespace) -> None:
     """List recent overrides."""
     from datetime import datetime, timedelta, timezone
@@ -380,6 +408,13 @@ def main() -> None:
     list_parser = ov_sub.add_parser("list", help="List recent overrides")
     list_parser.add_argument("--days", type=int, default=7)
     list_parser.add_argument("--agent", type=str, default=None)
+    create_parser = ov_sub.add_parser("create", help="Create a human override")
+    create_parser.add_argument("eval_id", help="Evaluation ID to override")
+    create_parser.add_argument("--corrector", required=True, help="Who is overriding (e.g. human:rob)")
+    create_parser.add_argument(
+        "--dimension", action="append", required=True,
+        help="Corrected dimension as name=score (repeatable)",
+    )
 
     # governance
     gov_parser = subparsers.add_parser("governance", help="Governance management")
@@ -423,8 +458,10 @@ def _dispatch_governance(args: argparse.Namespace) -> None:
 def _dispatch_overrides(args: argparse.Namespace) -> None:
     if args.overrides_command == "list":
         cmd_overrides_list(args)
+    elif args.overrides_command == "create":
+        cmd_overrides_create(args)
     else:
-        print("Usage: arbiter overrides {list}", file=sys.stderr)
+        print("Usage: arbiter overrides {list,create}", file=sys.stderr)
         sys.exit(1)
 
 
