@@ -1,6 +1,5 @@
 """Pytest configuration for Arbiter tests."""
 
-import pytest
 
 
 def pytest_configure(config):

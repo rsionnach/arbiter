@@ -1,6 +1,5 @@
 """Tests for GasTown adapter — wisp parsing and dedup."""
 
-import pytest
 
 from nthlayer_measure.adapters.gastown import GasTownAdapter
 
@@ -9,8 +8,8 @@ def _make_wisp(wisp_id: str = "w1", worker: str = "polecat-1", rig: str = "wyver
     return {
         "id": wisp_id,
         "labels": [
-            f"type:plugin-run",
-            f"plugin:quality-review-result",
+            "type:plugin-run",
+            "plugin:quality-review-result",
             f"worker:{worker}",
             f"rig:{rig}",
             f"score:{score}",

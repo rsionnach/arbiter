@@ -1,7 +1,6 @@
 """Tests for Devin adapter — session parsing, structured output, dedup."""
 
 import json
-import pytest
 
 from nthlayer_measure.adapters.devin import DevinAdapter
 

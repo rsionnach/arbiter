@@ -8,7 +8,6 @@ import contextlib
 import io
 import json
 import textwrap
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 

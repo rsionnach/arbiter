@@ -2,7 +2,6 @@
 
 import pytest
 import pytest_asyncio
-from datetime import timedelta, timezone, datetime
 
 from nthlayer_measure.store.sqlite import SQLiteScoreStore
 from nthlayer_measure.trends.tracker import StoreTrendTracker

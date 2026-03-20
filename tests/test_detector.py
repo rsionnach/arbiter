@@ -1,6 +1,5 @@
 """Tests for ThresholdDetector — degradation detection against SLO thresholds."""
 
-import pytest
 
 from nthlayer_measure.detection.detector import SLOThresholds, ThresholdDetector
 from nthlayer_measure.types import TrendWindow

@@ -249,7 +249,7 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
     async def _run():
         if args.agent:
             from nthlayer_measure.calibration.slos import JudgmentSLOChecker
-            from nthlayer_measure.manifest import JudgmentSLO, load_manifest
+            from nthlayer_measure.manifest import load_manifest
 
             slo = None
             for ac in config.agents:

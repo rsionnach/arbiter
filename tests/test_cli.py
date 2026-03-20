@@ -2,7 +2,6 @@
 
 import json
 import pytest
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from nthlayer_measure.cli import (

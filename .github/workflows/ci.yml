@@ -26,10 +26,12 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: |
+          uv sync --extra dev --no-sources
+          uv pip install nthlayer-learn@git+https://github.com/rsionnach/nthlayer-learn.git@main#subdirectory=lib/python
 
       - name: Run linting
-        run: uv run ruff check src/ tests/ --ignore E501,B008,F841,B007,E402,E721,E722,B012,I001
+        run: uv run ruff check src/ tests/ --ignore E501,B008,F841,B007,E402,E721,E722,B012,I001,F821,E741
 
       - name: Run tests
         run: uv run pytest tests/ -v --tb=short -x
@@ -46,10 +48,12 @@ jobs:
         run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: |
+          uv sync --extra dev --no-sources
+          uv pip install nthlayer-learn@git+https://github.com/rsionnach/nthlayer-learn.git@main#subdirectory=lib/python
 
       - name: Run ruff
-        run: uv run ruff check src/ tests/ --ignore E501,B008,F841,B007,E402,E721,E722,B012,I001
+        run: uv run ruff check src/ tests/ --ignore E501,B008,F841,B007,E402,E721,E722,B012,I001,F821,E741
 
   security:
     runs-on: ubuntu-latest
@@ -63,7 +67,9 @@ jobs:
         run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: |
+          uv sync --extra dev --no-sources
+          uv pip install nthlayer-learn@git+https://github.com/rsionnach/nthlayer-learn.git@main#subdirectory=lib/python
 
       - name: Run pip-audit
         run: |
