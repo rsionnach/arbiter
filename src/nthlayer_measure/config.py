@@ -55,6 +55,13 @@ class DetectionConfig:
 
 
 @dataclass
+class VerdictConfig:
+    """Configuration for verdict integration."""
+
+    store_path: str = "verdicts.db"
+
+
+@dataclass
 class ArbiterConfig:
     """Top-level Arbiter configuration matching arbiter.yaml shape."""
 
@@ -64,6 +71,7 @@ class ArbiterConfig:
     detection: DetectionConfig = field(default_factory=DetectionConfig)
     dimensions: list[str] = field(default_factory=lambda: ["correctness", "completeness", "safety"])
     agents: list[AgentConfig] = field(default_factory=list)
+    verdict: VerdictConfig | None = None
 
 
 def load_config(path: Path) -> ArbiterConfig:
@@ -100,6 +108,16 @@ def load_config(path: Path) -> ArbiterConfig:
             adapter_config=agent_data.get("adapter_config", {}),
         ))
 
+    verdict_cfg = None
+    verdict_raw = raw.get("verdict")
+    if verdict_raw is not None:
+        if not isinstance(verdict_raw, dict):
+            raise ValueError(f"Config section 'verdict' must be a mapping, got {type(verdict_raw).__name__}")
+        store_raw = verdict_raw.get("store", {})
+        if not isinstance(store_raw, dict):
+            raise ValueError(f"Config section 'verdict.store' must be a mapping, got {type(store_raw).__name__}")
+        verdict_cfg = VerdictConfig(store_path=store_raw.get("path", "verdicts.db"))
+
     return ArbiterConfig(
         evaluator=evaluator,
         store=store,
@@ -107,4 +125,5 @@ def load_config(path: Path) -> ArbiterConfig:
         detection=detection,
         dimensions=dimensions,
         agents=agents,
+        verdict=verdict_cfg,
     )

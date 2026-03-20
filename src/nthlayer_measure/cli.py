@@ -9,8 +9,8 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from arbiter.config import ArbiterConfig, load_config
-from arbiter.types import AutonomyLevel
+from nthlayer_measure.config import ArbiterConfig, load_config
+from nthlayer_measure.types import AutonomyLevel
 
 
 def _load_config(args: argparse.Namespace) -> ArbiterConfig:
@@ -22,19 +22,19 @@ def _load_config(args: argparse.Namespace) -> ArbiterConfig:
 
 
 def _build_store(config: ArbiterConfig) -> "SQLiteScoreStore":
-    from arbiter.store.sqlite import SQLiteScoreStore
+    from nthlayer_measure.store.sqlite import SQLiteScoreStore
 
     return SQLiteScoreStore(config.store.path)
 
 
 def _build_tracker(store: "SQLiteScoreStore") -> "StoreTrendTracker":
-    from arbiter.trends.tracker import StoreTrendTracker
+    from nthlayer_measure.trends.tracker import StoreTrendTracker
 
     return StoreTrendTracker(store)
 
 
 def _build_evaluator(config: ArbiterConfig) -> "ModelEvaluator":
-    from arbiter.pipeline.evaluator import ModelEvaluator
+    from nthlayer_measure.pipeline.evaluator import ModelEvaluator
 
     return ModelEvaluator(
         model=config.evaluator.model,
@@ -49,7 +49,7 @@ def _build_adapter(config: ArbiterConfig):
     """
     agents = config.agents
     if not agents:
-        from arbiter.adapters.webhook import WebhookAdapter
+        from nthlayer_measure.adapters.webhook import WebhookAdapter
 
         return WebhookAdapter()
 
@@ -63,7 +63,7 @@ def _build_adapter(config: ArbiterConfig):
     ac = agent.adapter_config
 
     if agent.adapter == "gastown":
-        from arbiter.adapters.gastown import GasTownAdapter
+        from nthlayer_measure.adapters.gastown import GasTownAdapter
 
         return GasTownAdapter(
             rig_name=ac.get("rig_name", ""),
@@ -71,7 +71,7 @@ def _build_adapter(config: ArbiterConfig):
             bd_path=ac.get("bd_path", "bd"),
         )
     elif agent.adapter == "devin":
-        from arbiter.adapters.devin import DevinAdapter
+        from nthlayer_measure.adapters.devin import DevinAdapter
         import os
 
         api_key_env = ac.get("api_key_env", "DEVIN_API_KEY")
@@ -81,7 +81,7 @@ def _build_adapter(config: ArbiterConfig):
             base_url=ac.get("base_url", "https://api.devin.ai"),
         )
     else:
-        from arbiter.adapters.webhook import WebhookAdapter
+        from nthlayer_measure.adapters.webhook import WebhookAdapter
 
         return WebhookAdapter(
             host=ac.get("host", "0.0.0.0"),
@@ -90,11 +90,20 @@ def _build_adapter(config: ArbiterConfig):
 
 
 def _build_pipeline(config: ArbiterConfig):
-    from arbiter.detection.detector import SLOThresholds, ThresholdDetector
-    from arbiter.governance.engine import ErrorBudgetGovernance
-    from arbiter.pipeline.router import PipelineRouter
+    from nthlayer_measure.detection.detector import SLOThresholds, ThresholdDetector
+    from nthlayer_measure.governance.engine import ErrorBudgetGovernance
+    from nthlayer_measure.pipeline.router import PipelineRouter
+    from nthlayer_measure.store.sqlite import SQLiteScoreStore
 
-    store = _build_store(config)
+    # Build verdict store if configured
+    verdict_store = None
+    if config.verdict is not None:
+        from nthlayer_learn import SQLiteVerdictStore
+        verdict_store = SQLiteVerdictStore(config.verdict.store_path)
+
+    # Share the same verdict store between score store (for override resolution)
+    # and router (for verdict creation)
+    store = SQLiteScoreStore(config.store.path, verdict_store=verdict_store)
     tracker = _build_tracker(store)
     evaluator = _build_evaluator(config)
     governance = ErrorBudgetGovernance(
@@ -120,6 +129,7 @@ def _build_pipeline(config: ArbiterConfig):
         dimensions=config.dimensions,
         governance=governance,
         detector=detector,
+        verdict_store=verdict_store,
     )
 
 
@@ -135,7 +145,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
 
 def cmd_evaluate(args: argparse.Namespace) -> None:
     """One-shot evaluation of a file or stdin."""
-    from arbiter.types import AgentOutput
+    from nthlayer_measure.types import AgentOutput
 
     config = _load_config(args)
     store = _build_store(config)
@@ -199,12 +209,47 @@ def cmd_status(args: argparse.Namespace) -> None:
 def cmd_calibrate(args: argparse.Namespace) -> None:
     """Run calibration report."""
     config = _load_config(args)
+
+    if getattr(args, "verdict", False):
+        # Verdict-based calibration (system-wide)
+        if config.verdict is None:
+            print(
+                "Error: --verdict requires a 'verdict' section in arbiter.yaml",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        from nthlayer_learn import SQLiteVerdictStore
+        from nthlayer_measure.calibration.verdict_calibration import VerdictCalibration
+
+        verdict_store = SQLiteVerdictStore(config.verdict.store_path)
+        cal = VerdictCalibration(verdict_store)
+
+        async def _run():
+            return await cal.check(window_days=args.window_days)
+
+        report = asyncio.run(_run())
+        verdict_store.close()
+        result = {
+            "producer": report.producer,
+            "total": report.total,
+            "total_resolved": report.total_resolved,
+            "confirmation_rate": report.confirmation_rate,
+            "override_rate": report.override_rate,
+            "partial_rate": report.partial_rate,
+            "pending_rate": report.pending_rate,
+            "mean_confidence_on_confirmed": report.mean_confidence_on_confirmed,
+            "mean_confidence_on_overridden": report.mean_confidence_on_overridden,
+        }
+        print(json.dumps(result, indent=2))
+        return
+
     store = _build_store(config)
 
     async def _run():
         if args.agent:
-            from arbiter.calibration.slos import JudgmentSLOChecker
-            from arbiter.manifest import JudgmentSLO, load_manifest
+            from nthlayer_measure.calibration.slos import JudgmentSLOChecker
+            from nthlayer_measure.manifest import load_manifest
 
             slo = None
             for ac in config.agents:
@@ -216,13 +261,48 @@ def cmd_calibrate(args: argparse.Namespace) -> None:
             report = await checker.check(args.agent, window_days=args.window_days)
             return asdict(report)
         else:
-            from arbiter.calibration.loop import OverrideCalibration
+            from nthlayer_measure.calibration.loop import OverrideCalibration
 
             cal = OverrideCalibration(store)
             report = await cal.calibrate(window_days=args.window_days)
             return asdict(report)
 
     result = asyncio.run(_run())
+    print(json.dumps(result, indent=2))
+
+
+def cmd_overrides_create(args: argparse.Namespace) -> None:
+    """Create a human override for an evaluation."""
+    config = _load_config(args)
+
+    verdict_store = None
+    if config.verdict is not None:
+        from nthlayer_learn import SQLiteVerdictStore
+        verdict_store = SQLiteVerdictStore(config.verdict.store_path)
+
+    from nthlayer_measure.store.sqlite import SQLiteScoreStore
+    store = SQLiteScoreStore(config.store.path, verdict_store=verdict_store)
+
+    corrected_dimensions: dict[str, float] = {}
+    for d in args.dimension:
+        if "=" not in d:
+            print(
+                f"Error: dimension must be name=score (got '{d}')",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        name, val = d.split("=", 1)
+        corrected_dimensions[name] = float(val)
+
+    async def _run():
+        await store.save_override(args.eval_id, corrected_dimensions, args.corrector)
+
+    asyncio.run(_run())
+    result = {
+        "eval_id": args.eval_id,
+        "corrector": args.corrector,
+        "corrected_dimensions": corrected_dimensions,
+    }
     print(json.dumps(result, indent=2))
 
 
@@ -266,7 +346,7 @@ def cmd_governance_restore(args: argparse.Namespace) -> None:
     store = _build_store(config)
     tracker = _build_tracker(store)
 
-    from arbiter.governance.engine import ErrorBudgetGovernance
+    from nthlayer_measure.governance.engine import ErrorBudgetGovernance
 
     governance = ErrorBudgetGovernance(
         store=store,
@@ -294,7 +374,7 @@ def cmd_governance_restore(args: argparse.Namespace) -> None:
 def main() -> None:
     """Entry point with subcommands."""
     parser = argparse.ArgumentParser(
-        prog="arbiter",
+        prog="nthlayer-measure",
         description="Arbiter — AI agent quality measurement",
     )
     parser.add_argument(
@@ -324,6 +404,10 @@ def main() -> None:
     cal_parser = subparsers.add_parser("calibrate", help="Run calibration report")
     cal_parser.add_argument("--window-days", type=int, default=30)
     cal_parser.add_argument("--agent", type=str, default=None)
+    cal_parser.add_argument(
+        "--verdict", action="store_true", default=False,
+        help="Use verdict-based calibration (system-wide)",
+    )
 
     # overrides
     ov_parser = subparsers.add_parser("overrides", help="Override management")
@@ -331,6 +415,13 @@ def main() -> None:
     list_parser = ov_sub.add_parser("list", help="List recent overrides")
     list_parser.add_argument("--days", type=int, default=7)
     list_parser.add_argument("--agent", type=str, default=None)
+    create_parser = ov_sub.add_parser("create", help="Create a human override")
+    create_parser.add_argument("eval_id", help="Evaluation ID to override")
+    create_parser.add_argument("--corrector", required=True, help="Who is overriding (e.g. human:rob)")
+    create_parser.add_argument(
+        "--dimension", action="append", required=True,
+        help="Corrected dimension as name=score (repeatable)",
+    )
 
     # governance
     gov_parser = subparsers.add_parser("governance", help="Governance management")
@@ -367,15 +458,17 @@ def _dispatch_governance(args: argparse.Namespace) -> None:
     elif args.gov_command == "restore":
         cmd_governance_restore(args)
     else:
-        print("Usage: arbiter governance {show,restore}", file=sys.stderr)
+        print("Usage: nthlayer-measure governance {show,restore}", file=sys.stderr)
         sys.exit(1)
 
 
 def _dispatch_overrides(args: argparse.Namespace) -> None:
     if args.overrides_command == "list":
         cmd_overrides_list(args)
+    elif args.overrides_command == "create":
+        cmd_overrides_create(args)
     else:
-        print("Usage: arbiter overrides {list}", file=sys.stderr)
+        print("Usage: nthlayer-measure overrides {list,create}", file=sys.stderr)
         sys.exit(1)
 
 

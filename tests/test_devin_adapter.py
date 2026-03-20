@@ -1,9 +1,8 @@
 """Tests for Devin adapter — session parsing, structured output, dedup."""
 
 import json
-import pytest
 
-from arbiter.adapters.devin import DevinAdapter
+from nthlayer_measure.adapters.devin import DevinAdapter
 
 
 def _make_session(session_id: str = "s1", status: str = "completed", title: str = "Fix bug", structured_output: dict | None = None):

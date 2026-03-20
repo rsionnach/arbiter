@@ -6,10 +6,9 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
 from typing import Protocol
 
-from arbiter.types import AgentOutput, QualityScore
+from nthlayer_measure.types import AgentOutput, QualityScore
 
 
 class Evaluator(Protocol):

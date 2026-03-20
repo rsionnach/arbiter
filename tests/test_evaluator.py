@@ -1,12 +1,12 @@
 """Tests for ModelEvaluator — prompt construction + response parsing."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from arbiter.pipeline.evaluator import ModelEvaluator, _ModelResponse, _compute_cost
-from arbiter.types import AgentOutput
+from nthlayer_measure.pipeline.evaluator import ModelEvaluator, _ModelResponse, _compute_cost
+from nthlayer_measure.types import AgentOutput
 
 
 @pytest.fixture

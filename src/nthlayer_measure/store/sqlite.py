@@ -9,8 +9,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from arbiter.telemetry import emit_override_event, emit_state_transition_event
-from arbiter.types import QualityScore
+from nthlayer_learn import VerdictStore as VerdictStoreBase
+
+from nthlayer_measure.telemetry import emit_override_event, emit_state_transition_event
+from nthlayer_measure.types import QualityScore
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
@@ -18,18 +20,30 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 class SQLiteScoreStore:
     """Persists evaluation scores to a local SQLite database."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, verdict_store: VerdictStoreBase | None = None) -> None:
         self._db_path = Path(db_path)
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._lock = threading.Lock()
+        self._verdict_store = verdict_store
         self._apply_schema()
+        self._migrate_verdict_id()
 
     def _apply_schema(self) -> None:
         schema = _SCHEMA_PATH.read_text()
         with self._lock:
             self._conn.executescript(schema)
+
+    def _migrate_verdict_id(self) -> None:
+        """Add verdict_id column to evaluations if not present."""
+        with self._lock:
+            try:
+                self._conn.execute("ALTER TABLE evaluations ADD COLUMN verdict_id TEXT")
+                self._conn.commit()
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e):
+                    raise
 
     def _save_score_sync(self, score: QualityScore) -> None:
         with self._lock:
@@ -56,6 +70,19 @@ class SQLiteScoreStore:
 
     async def save_score(self, score: QualityScore) -> None:
         await asyncio.to_thread(self._save_score_sync, score)
+
+    def _set_verdict_id_sync(self, eval_id: str, verdict_id: str) -> None:
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE evaluations SET verdict_id = ? WHERE eval_id = ?",
+                (verdict_id, eval_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError(f"Cannot set verdict_id on non-existent evaluation: {eval_id}")
+            self._conn.commit()
+
+    async def set_verdict_id(self, eval_id: str, verdict_id: str) -> None:
+        await asyncio.to_thread(self._set_verdict_id_sync, eval_id, verdict_id)
 
     def _get_scores_sync(
         self, agent_name: str, since: datetime, limit: int
@@ -118,27 +145,58 @@ class SQLiteScoreStore:
     def _save_override_sync(
         self, eval_id: str, corrected_dimensions: dict[str, float], corrector: str
     ) -> None:
+        verdict_id = None
         with self._lock:
             # Verify eval_id exists
             exists = self._conn.execute(
                 "SELECT 1 FROM evaluations WHERE eval_id = ?", (eval_id,)
             ).fetchone()
             if not exists:
-                raise ValueError(f"Cannot override non-existent evaluation: {eval_id}")
+                raise ValueError(
+                    f"Cannot override non-existent evaluation: {eval_id}"
+                )
 
             for dim_name, corrected_score in corrected_dimensions.items():
                 row = self._conn.execute(
-                    "SELECT score FROM dimension_scores WHERE eval_id = ? AND dimension = ?",
+                    "SELECT score FROM dimension_scores "
+                    "WHERE eval_id = ? AND dimension = ?",
                     (eval_id, dim_name),
                 ).fetchone()
                 original_score = row["score"] if row else 0.0
                 self._conn.execute(
-                    "INSERT INTO overrides (override_id, eval_id, dimension, original_score, corrected_score, corrector) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), eval_id, dim_name, original_score, corrected_score, corrector),
+                    "INSERT INTO overrides "
+                    "(override_id, eval_id, dimension, original_score, "
+                    "corrected_score, corrector) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        str(uuid.uuid4()),
+                        eval_id,
+                        dim_name,
+                        original_score,
+                        corrected_score,
+                        corrector,
+                    ),
                 )
-                emit_override_event(eval_id, dim_name, original_score, corrected_score, corrector)
+                emit_override_event(
+                    eval_id, dim_name, original_score,
+                    corrected_score, corrector,
+                )
             self._conn.commit()
+
+            # Look up verdict_id for resolution
+            if self._verdict_store is not None:
+                verdict_row = self._conn.execute(
+                    "SELECT verdict_id FROM evaluations WHERE eval_id = ?",
+                    (eval_id,),
+                ).fetchone()
+                verdict_id = (
+                    verdict_row["verdict_id"] if verdict_row else None
+                )
+
+        # Resolve linked verdict outside the lock (verdict store has its own)
+        if self._verdict_store is not None and verdict_id is not None:
+            self._verdict_store.resolve(
+                verdict_id, "overridden", override={"by": corrector},
+            )
 
     async def save_override(
         self, eval_id: str, corrected_dimensions: dict[str, float], corrector: str

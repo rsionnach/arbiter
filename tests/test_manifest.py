@@ -1,9 +1,8 @@
 """Tests for OpenSRM manifest loader."""
 
 import pytest
-from pathlib import Path
 
-from arbiter.manifest import JudgmentSLO, load_manifest
+from nthlayer_measure.manifest import load_manifest
 
 
 @pytest.fixture
