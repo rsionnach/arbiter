@@ -1,4 +1,4 @@
-# Arbiter
+# nthlayer-measure
 
 **Universal quality measurement engine for AI agent output.**
 
@@ -244,7 +244,7 @@ This matters because teams routinely cut review depth or use cheaper models to s
 
 ## Integration with OpenSRM
 
-The Arbiter reads judgment SLO thresholds from [OpenSRM](https://github.com/rsionnach/nthlayer-spec) manifests when they're available. An agent's manifest declares its quality targets:
+The Arbiter reads judgment SLO thresholds from [OpenSRM](https://github.com/rsionnach/opensrm) manifests when they're available. An agent's manifest declares its quality targets:
 
 ```yaml
 # agent.reliability.yaml
@@ -335,7 +335,7 @@ Each component works alone. Someone who just needs agent quality measurement ado
 
 | Component | What it does | Link |
 |-----------|-------------|------|
-| **nthlayer-spec** | Specification for declaring service reliability requirements | [nthlayer-spec](https://github.com/rsionnach/nthlayer-spec) |
+| **OpenSRM** | Specification for declaring service reliability requirements | [OpenSRM](https://github.com/rsionnach/opensrm) |
 | **nthlayer-learn** | Data primitive for recording AI judgments and measuring correctness | [nthlayer-learn](https://github.com/rsionnach/nthlayer-learn) |
 | **nthlayer-measure** | Quality measurement and governance for AI agents (this repo) | [nthlayer-measure](https://github.com/rsionnach/nthlayer-measure) |
 | **NthLayer** | Generate monitoring infrastructure from manifests | [nthlayer](https://github.com/rsionnach/nthlayer) |
