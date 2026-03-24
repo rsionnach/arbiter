@@ -18,7 +18,7 @@ otel = ["opentelemetry-api>=1.20.0", "opentelemetry-sdk>=1.20.0"]
 nthlayer-measure = "nthlayer_measure.cli:main"
 
 [tool.uv.sources]
-nthlayer-learn = { path = "../verdicts/lib/python" }
+nthlayer-learn = { path = "../nthlayer-learn/lib/python" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
