@@ -8,9 +8,9 @@ Universal quality measurement engine for AI agent output. Evaluates agent output
 
 ## What This Is
 
-The Arbiter answers one question at production scale: which of my agents is producing good work, and which is silently degrading? It is framework-agnostic and model-agnostic. It works with any agent system via adapters, and the evaluation model is a configuration decision, not a hard dependency.
+The nthlayer-measure answers one question at production scale: which of my agents is producing good work, and which is silently degrading? It is framework-agnostic and model-agnostic. It works with any agent system via adapters, and the evaluation model is a configuration decision, not a hard dependency.
 
-The Arbiter is one component in the OpenSRM ecosystem (opensrm, nthlayer, sitrep, mayday) but is designed to stand alone. A team with no OpenSRM manifests can adopt the Arbiter with a simple config file.
+The nthlayer-measure is one component in the OpenSRM ecosystem (opensrm, nthlayer, nthlayer-correlate, nthlayer-respond) but is designed to stand alone. A team with no OpenSRM manifests can adopt the nthlayer-measure with a simple config file.
 
 ---
 
@@ -49,7 +49,7 @@ Agent Output ──▶ Adapter ──▶ Evaluation Pipeline ──▶ Score Sto
 
 ### Adapter Interface
 
-The adapter is the only integration point with external systems. Any agent system that implements the adapter interface can feed output into the Arbiter. The core pipeline never knows or cares what produced the output.
+The adapter is the only integration point with external systems. Any agent system that implements the adapter interface can feed output into the nthlayer-measure. The core pipeline never knows or cares what produced the output.
 
 Implemented adapters: webhook (generic HTTP POST), GasTown (polls bd quality-review-result wisps), Devin (polls Devin REST API for completed sessions). The webhook adapter is the default and works with anything.
 
@@ -93,7 +93,7 @@ Watches per-agent trend metrics against declared SLO thresholds. Emits alerts wh
 
 ### Self-Calibration Loop
 
-The Arbiter monitors its own judgment quality. Human corrections (override events) feed into OverrideCalibration (MAE per dimension) and JudgmentSLOChecker (false accept rate, precision, recall, windowed compliance). When an agent has an OpenSRM manifest, compliance is checked against declared targets. OTel `gen_ai.calibration.report` events are emitted with all metrics.
+The nthlayer-measure monitors its own judgment quality. Human corrections (override events) feed into OverrideCalibration (MAE per dimension) and JudgmentSLOChecker (false accept rate, precision, recall, windowed compliance). When an agent has an OpenSRM manifest, compliance is checked against declared targets. OTel `gen_ai.calibration.report` events are emitted with all metrics.
 
 **Signals tracked (two categories):**
 
@@ -106,15 +106,15 @@ Quality signals (per agent, per rolling window — pure arithmetic, no model):
 | Reversal rate | Fraction of evaluations later corrected by a human override |
 | Cost per evaluation | Token spend per evaluation, broken down by agent |
 
-Calibration signals (the Arbiter judging itself against human corrections):
+Calibration signals (the nthlayer-measure judging itself against human corrections):
 
 | Signal | Definition | Reference target |
 |--------|-----------|-----------------|
 | Reversal rate | Overridden evaluations / total evaluations | < 0.05 |
-| False accept rate | Of outputs humans scored lower, how many did the Arbiter score above threshold? | < 0.02 |
-| Precision | Of outputs Arbiter flagged low quality, what fraction did humans agree with? | > 0.90 |
-| Recall | Of outputs humans corrected downward, what fraction did Arbiter also flag? | > 0.85 |
-| MAE | Mean absolute error between Arbiter scores and human-corrected scores, per dimension | < 0.10 |
+| False accept rate | Of outputs humans scored lower, how many did the nthlayer-measure score above threshold? | < 0.02 |
+| Precision | Of outputs nthlayer-measure flagged low quality, what fraction did humans agree with? | > 0.90 |
+| Recall | Of outputs humans corrected downward, what fraction did nthlayer-measure also flag? | > 0.85 |
+| MAE | Mean absolute error between nthlayer-measure scores and human-corrected scores, per dimension | < 0.10 |
 
 Reference targets are guidance, not enforced thresholds. Enforced targets come from OpenSRM manifests.
 
@@ -154,7 +154,7 @@ Every evaluation creates a verdict via `PipelineRouter.run()`. Every human overr
 - `SQLiteScoreStore`: after `save_override()`, calls `verdict_store.resolve(verdict_id, "overridden", override={"by": corrector})` outside the threading lock.
 - `VerdictCalibration` (`src/nthlayer_measure/calibration/verdict_calibration.py`): strangler fig alongside `JudgmentSLOChecker`. Queries `verdict_store.accuracy(AccuracyFilter(producer_system="arbiter", from_time=...))`. System-wide only — per-agent accuracy deferred to Phase 2+ (AccuracyFilter does not support filtering by subject.agent).
 
-**Verdict shape produced by Arbiter:**
+**Verdict shape produced by nthlayer-measure:**
 - `subject.type`: always `"agent_output"` | `subject.ref`: task_id | `subject.agent`: agent_name | `subject.summary`: `"Evaluation of {agent_name}: {task_id}"`
 - `judgment.action`: `"approve"` if avg dimension score >= `approve_threshold` else `"reject"`
 - `judgment.confidence`: score.confidence | `judgment.score`: mean of all dimension scores | `judgment.dimensions`: per-dimension dict
@@ -167,7 +167,7 @@ Every evaluation creates a verdict via `PipelineRouter.run()`. Every human overr
 
 ## OpenSRM Integration
 
-When an OpenSRM manifest is present, the Arbiter reads judgment SLO thresholds from it:
+When an OpenSRM manifest is present, the nthlayer-measure reads judgment SLO thresholds from it:
 
 ```yaml
 apiVersion: opensrm/v1
@@ -194,13 +194,13 @@ OpenSRM integration is additive — a plain `arbiter.yaml` config works without 
 
 ## OTel Conventions
 
-The Arbiter uses the OpenSRM OTel semantic conventions for AI decision telemetry:
+The nthlayer-measure uses the OpenSRM OTel semantic conventions for AI decision telemetry:
 
 - `gen_ai.decision.*` — emitted on every evaluation
 - `gen_ai.override.*` — emitted when a human corrects an evaluation
 - `gen_ai.agent.state.*` — emitted on governance state transitions
 
-These feed into NthLayer-generated dashboards and SitRep correlation. Emit them consistently — they are the integration surface with the rest of the ecosystem.
+These feed into NthLayer-generated dashboards and nthlayer-correlate correlation. Emit them consistently — they are the integration surface with the rest of the ecosystem.
 
 ---
 
@@ -302,12 +302,12 @@ verdict:
 
 | Component | Role |
 |-----------|------|
-| [nthlayer-spec](../nthlayer-spec/) | Shared manifest spec |
-| [nthlayer-learn](../verdicts/) | Data primitive — Arbiter evaluation output becomes a verdict; self-calibration queries verdict accuracy |
-| [nthlayer-measure](../arbiter/) | This repo — quality measurement + governance |
+| [opensrm](../opensrm/) | Shared manifest spec |
+| [nthlayer-learn](../nthlayer-learn/) | Data primitive — nthlayer-measure evaluation output becomes a verdict; self-calibration queries verdict accuracy |
+| [nthlayer-measure](../nthlayer-measure/) | This repo — quality measurement + governance |
 | [nthlayer](../nthlayer/) | Generates monitoring infrastructure from manifests |
-| [nthlayer-correlate](../sitrep/) | Signal correlation and situational awareness |
-| [nthlayer-respond](../mayday/) | Multi-agent incident response |
+| [nthlayer-correlate](../nthlayer-correlate/) | Signal correlation and situational awareness |
+| [nthlayer-respond](../nthlayer-respond/) | Multi-agent incident response |
 
 Each component works independently. Composition happens through shared OpenSRM manifests and OTel conventions.
 
@@ -315,4 +315,4 @@ Each component works independently. Composition happens through shared OpenSRM m
 
 ## Prior Art
 
-The core concept was validated as the Guardian, a Deacon plugin inside GasTown that scores per-worker output quality in the merge pipeline (PR #2263, merged). The Arbiter extracts that pattern into a universal, framework-agnostic tool.
+The core concept was validated as the Guardian, a Deacon plugin inside GasTown that scores per-worker output quality in the merge pipeline (PR #2263, merged). The nthlayer-measure extracts that pattern into a universal, framework-agnostic tool.
