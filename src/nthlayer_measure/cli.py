@@ -138,7 +138,7 @@ def _build_pipeline(config: MeasureConfig):
 
 def cmd_evaluate_once(args: argparse.Namespace) -> None:
     """One-shot Prometheus SLO evaluation — evaluate all SLOs, write verdicts, exit."""
-    from nthlayer_learn import SQLiteVerdictStore, create as verdict_create, link as verdict_link
+    from nthlayer_learn import SQLiteVerdictStore, create as verdict_create
 
     from nthlayer_measure.adapters.prometheus import evaluate_slos, load_specs
 

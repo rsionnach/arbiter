@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from nthlayer_measure.adapters.prometheus import (
-    EvaluationResult,
     SLODefinition,
     count_consecutive_breaches,
     evaluate_slos,
