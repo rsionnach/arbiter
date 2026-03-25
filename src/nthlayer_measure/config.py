@@ -62,6 +62,16 @@ class VerdictConfig:
 
 
 @dataclass
+class TriggerConfig:
+    """Configuration for downstream trigger chain."""
+
+    correlate_enabled: bool = False
+    correlate_args: dict[str, str] = field(default_factory=dict)
+    respond_enabled: bool = False
+    respond_args: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class MeasureConfig:
     """Top-level nthlayer-measure configuration matching measure.yaml shape."""
 
@@ -72,6 +82,7 @@ class MeasureConfig:
     dimensions: list[str] = field(default_factory=lambda: ["correctness", "completeness", "safety"])
     agents: list[AgentConfig] = field(default_factory=list)
     verdict: VerdictConfig | None = None
+    trigger: TriggerConfig = field(default_factory=TriggerConfig)
 
 
 def load_config(path: Path) -> MeasureConfig:
@@ -120,6 +131,18 @@ def load_config(path: Path) -> MeasureConfig:
             raise ValueError(f"Config section 'verdict.store' must be a mapping, got {type(store_raw).__name__}")
         verdict_cfg = VerdictConfig(store_path=store_raw.get("path", "verdicts.db"))
 
+    trigger_cfg = TriggerConfig()
+    trigger_raw = raw.get("trigger")
+    if isinstance(trigger_raw, dict):
+        corr = trigger_raw.get("correlate", {})
+        resp = trigger_raw.get("respond", {})
+        trigger_cfg = TriggerConfig(
+            correlate_enabled=bool(corr.get("enabled", False)),
+            correlate_args=corr.get("args", {}),
+            respond_enabled=bool(resp.get("enabled", False)),
+            respond_args=resp.get("args", {}),
+        )
+
     return MeasureConfig(
         evaluator=evaluator,
         store=store,
@@ -128,4 +151,5 @@ def load_config(path: Path) -> MeasureConfig:
         dimensions=dimensions,
         agents=agents,
         verdict=verdict_cfg,
+        trigger=trigger_cfg,
     )
