@@ -2,7 +2,7 @@
 
 Universal quality measurement engine for AI agent output. Evaluates agent output quality, tracks per-agent trends over rolling windows, detects degradation, self-calibrates its own judgment accuracy, and governs agent autonomy based on measured performance.
 
-**Status: fully implemented — pipeline, store, trends, calibration (MAE + judgment SLOs + verdict-based), governance, degradation detector, OTel instrumentation, cost tracking, CLI subcommands, OpenSRM manifest integration, verdict integration (Phase 1), and three adapters (webhook, GasTown, Devin).**
+**Status: fully implemented — pipeline, store, trends, calibration (MAE + judgment SLOs + verdict-based), governance, degradation detector, OTel instrumentation, cost tracking, CLI subcommands, OpenSRM manifest integration, verdict integration (Phase 1), three adapters (webhook, GasTown, Devin), and Prometheus SLO polling adapter with evaluate-once subcommand.**
 
 ---
 
@@ -59,6 +59,38 @@ Implemented adapters: webhook (generic HTTP POST), GasTown (polls bd quality-rev
 - **devin**: Persistent lazy `httpx.AsyncClient` (one client per adapter instance, not per call). Polls `/v1/sessions`, fetches detail for completed/stopped/failed sessions. `_get_session` returns `None` on `HTTPError` and skips the yield — no exception propagation. Uses `structured_output` if present, falls back to `title`. Sets `agent_name = "devin:{session_id}"`.
 - Both polling adapters (gastown, devin) use a `BoundedSeenSet` (from `adapters/_util.py`) capped at 10 000 entries (LRU eviction via `OrderedDict`) to prevent unbounded memory growth.
 
+### Prometheus SLO Polling Adapter
+
+`adapters/prometheus.py` — standalone Prometheus polling adapter. Does not require a `measure.yaml` config; used directly by the `evaluate-once` CLI subcommand.
+
+**Core functions:**
+- `load_specs(specs_dir)`: loads OpenSRM YAML specs from a directory, extracts SLO definitions, builds PromQL queries per SLO type. Availability target >1 is normalized to fraction (99.9 → 0.999). Judgment SLO names: `reversal_rate`, `high_confidence_failure`, `calibration`, `feedback_latency`.
+- `evaluate_slos(prometheus_url, slos, verdict_store, hysteresis_threshold=3)`: async; evaluates all SLOs, applies breach semantics and hysteresis, returns `list[EvaluationResult]`.
+- `query_prometheus(client, url, promql)`: async instant query; returns scalar float or `None` on failure/NaN (`val != val` check). Catches `httpx.HTTPError`, `ValueError`, `KeyError`, `IndexError`.
+- `query_firing_alerts(client, url, service=None)`: async; queries `/api/v1/alerts`, returns list of dicts for alerts with `state=="firing"`; optional `service` label filter applied after fetch. Catches `httpx.HTTPError`, `ValueError`, `KeyError`.
+- `count_consecutive_breaches(verdicts, service, slo_name)`: walks verdict list newest-first; matches on `v.subject.type=="evaluation"` AND `v.subject.ref==service` AND `custom["slo_name"]==slo_name`; counts consecutive `breach=True` entries, stops at first non-breach.
+
+**PromQL queries (`_judgment_slo_query`):**
+- `reversal_rate`: `sum(increase(gen_ai_overrides_total[w])) / sum(increase(gen_ai_decisions_total[w]))`
+- `high_confidence_failure`: `sum(increase(gen_ai_overrides_hcf_total[w])) / sum(increase(gen_ai_decisions_total{confidence_bucket="high"}[w]))`
+- `calibration`: `gen_ai_calibration_error{service=...}`
+- `feedback_latency`: `gen_ai_feedback_latency_seconds{service=...}`
+
+**Breach semantics:**
+- `reversal_rate`, `high_confidence_failure`, `calibration`, `feedback_latency` (judgment): breach if `current > target`
+- `availability` (traditional): breach if error budget ratio `< 0`
+- `latency` (traditional): breach if `current > target / 1000` (target in ms, Prometheus value in seconds)
+- all others: breach if `current < target`
+
+**Hysteresis:**
+- Judgment SLOs: breach only after `consecutive >= hysteresis_threshold` (default 3). Consecutive count is derived from recent verdicts in the verdict store via `VerdictFilter(producer_system="nthlayer-measure", subject_type="evaluation", limit=20)`.
+- Traditional SLOs: breach immediately — Prometheus `for` duration handles hysteresis externally.
+
+**Verdict shape from `evaluate-once`:**
+- `subject.type="evaluation"`, `subject.ref=service`
+- `judgment.action="flag"|"approve"`, `judgment.confidence=0.95` (traditional) or `0.85` (judgment)
+- `metadata.custom`: slo_type, slo_name, target, current_value, breach, consecutive
+
 ### Evaluation Pipeline
 
 Receives normalised agent output from adapters, constructs an evaluation prompt with the output and declared quality dimensions, calls the configured evaluation model, parses and persists the resulting scores. The evaluation model is configured per-deployment — Claude, Gemini, or a local model. The transport layer is identical regardless of which model is used.
@@ -77,7 +109,9 @@ Persists evaluation results with agent identity, timestamp, quality dimensions, 
 
 **SQLiteScoreStore implementation details:**
 - All DB operations are guarded by a `threading.Lock`; async methods use `asyncio.to_thread` to avoid blocking the event loop.
-- `save_override` validates that the `eval_id` exists before writing (raises `ValueError` on unknown id).
+- `save_override` validates that the `eval_id` exists before writing (raises `ValueError` on unknown id); calls `emit_override_event` inside the lock, then resolves linked verdict outside the lock.
+- `get_overrides(since, limit=100, agent_name=None)`: optional `agent_name` filter via JOIN with evaluations table.
+- `set_autonomy(agent_name, level, updated_by)`: upserts `agent_autonomy`, inserts `governance_log`; calls `emit_state_transition_event` outside the lock.
 - Call `close()` to release the connection when done.
 - Accepts optional `verdict_store: VerdictStoreBase | None = None`. When set: override triggers `verdict_store.resolve(verdict_id, "overridden", override={"by": corrector})` outside the lock.
 - `set_verdict_id(eval_id, verdict_id)`: async; raises `ValueError` on unknown `eval_id`. Links evaluations row to verdict.
@@ -254,7 +288,18 @@ agents:
 verdict:
   store:
     path: verdicts.db
+
+# Optional — trigger downstream chain on breach. Both sections default to disabled.
+trigger:
+  correlate:
+    enabled: false
+    args: {}
+  respond:
+    enabled: false
+    args: {}
 ```
+
+**TriggerConfig** (`config.py`): `correlate_enabled`, `correlate_args`, `respond_enabled`, `respond_args`. Parsed from `trigger.correlate` and `trigger.respond` YAML blocks. Defaults to all disabled. Used by `evaluate-once` to invoke `nthlayer-correlate correlate` and/or `nthlayer-respond respond` when SLO breaches are detected.
 
 **Config validation:** `load_config` raises `ValueError` if any top-level section (e.g. `evaluator`, `store`) is not a YAML mapping, or if any entry in `agents:` is not a mapping or is missing the required `name` field. Default dimensions when `dimensions:` is omitted: `["correctness", "completeness", "safety"]`.
 
@@ -276,6 +321,7 @@ verdict:
 | `overrides create <eval_id> --corrector P --dimension name=score [...]` | Create a human override for an evaluation (repeatable `--dimension`). When `verdict:` is configured, wires `verdict_store` so the override resolves the linked verdict as "overridden". |
 | `governance show <agent_name>` | Print current autonomy level (agent_name is positional) |
 | `governance restore <agent_name> <level> --approver P` | Restore autonomy; agent_name and level are positional, --approver is required (safety ratchet) |
+| `evaluate-once <specs_dir> --prometheus-url U --verdict-store PATH [--hysteresis N]` | One-shot Prometheus SLO evaluation: loads OpenSRM specs from dir, queries Prometheus, writes verdicts to verdict store, exits. Exits 2 if any breach detected. Verdict confidence: 0.95 (traditional SLO) or 0.85 (judgment SLO). When `trigger.correlate.enabled=true` in config, `_trigger_chain()` queries verdict store for most recent `nthlayer-measure/evaluation` verdict and invokes `nthlayer-correlate correlate --trigger-verdict <id>`; passes `--respond-args <json>` if respond also enabled. No measure.yaml required for core evaluation; config needed for trigger chain. |
 
 ---
 
@@ -285,6 +331,12 @@ verdict:
 - Valid POST → 200 (`{"status": "ok"}`); item retrievable from `adapter._queue`
 - GET → 405; missing required fields → 400; invalid JSON → 400
 - Body > 10 MB (via `Content-Length`) → 413; headers > 64 KB → 431; queue full (1000 items) → 503
+
+`tests/test_prometheus.py` — Prometheus polling adapter tests. Uses `MemoryStore` from nthlayer_learn as verdict_store fixture. Coverage:
+- `load_specs`: parses 3 SLOs from sample spec (availability, reversal_rate, latency), classifies judgment vs traditional, normalizes availability target (99.9 → 0.999), builds correct PromQL (gen_ai_overrides_total / gen_ai_decisions_total for reversal_rate), handles empty dir.
+- `query_prometheus`: returns float value, returns `None` on empty results, returns `None` on NaN response.
+- `count_consecutive_breaches`: counts from newest verdict, stops at first non-breach, returns 0 when newest is not a breach.
+- `evaluate_slos`: healthy → no breach; judgment breach below hysteresis threshold (consecutive=1, breach=False); judgment breach at threshold (3 consecutive, breach=True); traditional SLO breaches immediately without hysteresis; recovery (value returns healthy) resets consecutive to 0.
 
 `tests/test_verdict_integration.py` — Phase 1 integration test suite. Covers:
 - `TestVerdictConfig`: config loading with/without `verdict:` section; `VerdictConfig` default `store_path="verdicts.db"`.

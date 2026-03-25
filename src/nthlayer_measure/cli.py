@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -134,6 +135,124 @@ def _build_pipeline(config: MeasureConfig):
 
 
 # --- Subcommand handlers ---
+
+
+def cmd_evaluate_once(args: argparse.Namespace) -> None:
+    """One-shot Prometheus SLO evaluation — evaluate all SLOs, write verdicts, exit."""
+    from nthlayer_learn import SQLiteVerdictStore, create as verdict_create
+
+    from nthlayer_measure.adapters.prometheus import evaluate_slos, load_specs
+
+    specs_dir = Path(args.specs_dir)
+    slos = load_specs(specs_dir)
+    if not slos:
+        print(f"No SLO definitions found in {specs_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    verdict_store = SQLiteVerdictStore(args.verdict_store)
+
+    async def _run():
+        results = await evaluate_slos(
+            prometheus_url=args.prometheus_url,
+            slos=slos,
+            verdict_store=verdict_store,
+            hysteresis_threshold=args.hysteresis,
+        )
+
+        breach_count = 0
+        for r in results:
+            v = verdict_create(
+                subject={
+                    "type": "evaluation",
+                    "ref": r.service,
+                    "summary": f"{r.slo_name} {'BREACH' if r.breach else 'OK'}: {r.current_value:.4f} (target {r.target})",
+                },
+                judgment={
+                    "action": "flag" if r.breach else "approve",
+                    "confidence": 0.95 if r.slo_type == "traditional" else 0.85,
+                },
+                producer={"system": "nthlayer-measure"},
+                metadata={"custom": {
+                    "slo_type": r.slo_type,
+                    "slo_name": r.slo_name,
+                    "target": r.target,
+                    "current_value": r.current_value,
+                    "breach": r.breach,
+                    "consecutive": r.consecutive,
+                }},
+            )
+            verdict_store.put(v)
+            status = "BREACH" if r.breach else "OK"
+            print(f"  {r.service}/{r.slo_name}: {status} (value={r.current_value:.4f}, target={r.target}, consecutive={r.consecutive}) → {v.id}")
+
+            if r.breach:
+                breach_count += 1
+
+        print(f"\nEvaluated {len(results)} SLOs, {breach_count} in breach.")
+        return results
+
+    try:
+        results = asyncio.run(_run())
+    finally:
+        verdict_store.close()
+
+    # Trigger downstream chain for breach verdicts
+    breach_results = [r for r in results if r.breach]
+    if breach_results:
+        _trigger_chain(args, breach_results)
+        sys.exit(2)
+
+
+def _trigger_chain(args, breach_results):
+    """Invoke downstream components for breach results via subprocess."""
+
+    config_path = getattr(args, "config", None) or Path("measure.yaml")
+    if not config_path.exists():
+        return  # No config, no trigger chain
+
+    config = load_config(config_path)
+    if not config.trigger.correlate_enabled:
+        return
+
+    # Build correlate command
+    corr_args = config.trigger.correlate_args
+    respond_args = config.trigger.respond_args if config.trigger.respond_enabled else {}
+
+    # Find the most recent breach verdict ID from the store
+    from nthlayer_learn import SQLiteVerdictStore, VerdictFilter
+
+    verdict_store = SQLiteVerdictStore(args.verdict_store)
+    recent = verdict_store.query(VerdictFilter(
+        producer_system="nthlayer-measure",
+        subject_type="evaluation",
+        limit=1,
+    ))
+    if not recent:
+        return
+
+    trigger_id = recent[0].id
+
+    cmd = [
+        "nthlayer-correlate", "correlate",
+        "--trigger-verdict", trigger_id,
+        "--prometheus-url", corr_args.get("prometheus-url", args.prometheus_url),
+        "--specs-dir", corr_args.get("specs-dir", str(args.specs_dir)),
+        "--verdict-store", corr_args.get("verdict-store", args.verdict_store),
+    ]
+
+    # Forward respond args as JSON for correlate to pass through
+    if respond_args:
+        cmd.extend(["--respond-args", json.dumps(respond_args)])
+
+    print(f"\nTriggering correlate: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.stdout:
+            print(result.stdout)
+        if result.returncode != 0 and result.stderr:
+            print(f"Correlate stderr: {result.stderr}", file=sys.stderr)
+    except FileNotFoundError:
+        print("Error: nthlayer-correlate not found on PATH. Install it to enable the trigger chain.", file=sys.stderr)
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
@@ -443,11 +562,22 @@ def main() -> None:
     )
     restore_parser.add_argument("--approver", required=True)
 
+    # evaluate-once (Prometheus polling)
+    eo_parser = subparsers.add_parser("evaluate-once", help="One-shot Prometheus SLO evaluation")
+    eo_parser.add_argument("--prometheus-url", required=True, help="Prometheus base URL")
+    eo_parser.add_argument("--specs-dir", required=True, type=Path, help="Directory of OpenSRM spec YAMLs")
+    eo_parser.add_argument("--verdict-store", default="verdicts.db", help="Path to verdict SQLite DB")
+    eo_parser.add_argument(
+        "--hysteresis", type=int, default=3,
+        help="Consecutive breach windows before judgment SLO triggers (default: 3)",
+    )
+
     args = parser.parse_args()
 
     handlers = {
         "serve": cmd_serve,
         "evaluate": cmd_evaluate,
+        "evaluate-once": cmd_evaluate_once,
         "status": cmd_status,
         "calibrate": cmd_calibrate,
         "governance": _dispatch_governance,
