@@ -17,7 +17,8 @@ import httpx
 from nthlayer_measure.api.normalise import EvaluationRequest
 from nthlayer_measure.pipeline.evaluator import Evaluator
 from nthlayer_measure.store.protocol import ScoreStore
-from nthlayer_measure.types import AgentOutput
+from nthlayer_measure.tiering.classifier import TierClassifier
+from nthlayer_measure.types import AgentOutput, QualityScore
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class EvaluationQueue:
         verdict_store=None,
         approve_threshold: float = DEFAULT_APPROVE_THRESHOLD,
         max_workers: int = 5,
+        classifier: TierClassifier | None = None,
     ) -> None:
         self._evaluator = evaluator
         self._store = store
@@ -43,6 +45,7 @@ class EvaluationQueue:
         self._verdict_store = verdict_store
         self._approve_threshold = approve_threshold
         self._max_workers = max_workers
+        self._classifier = classifier
         self._queue: asyncio.Queue = asyncio.Queue()
         self._results: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._workers: list[asyncio.Task] = []
@@ -89,9 +92,44 @@ class EvaluationQueue:
                     metadata=request.metadata,
                 )
 
+                # Tier classification (if enabled)
+                tier = None
+                model_override = None
+                if self._classifier is not None:
+                    tier = self._classifier.classify(agent_output, agent_output.metadata)
+
+                    if tier == "minimal" and not self._classifier.should_sample(tier, agent_output.agent_name):
+                        # Auto-approve: skip model call entirely
+                        score = QualityScore(
+                            eval_id=str(uuid.uuid4()),
+                            agent_name=agent_output.agent_name,
+                            task_id=agent_output.task_id,
+                            dimensions={d: self._classifier._config.auto_approve_score for d in self._dimensions},
+                            confidence=0.0,
+                            evaluator_model="auto-approved",
+                            tier="minimal",
+                            auto_approved=True,
+                        )
+                        await self._store.save_score(score)
+                        self._results[eval_id] = {
+                            "status": "complete",
+                            "score": score,
+                            "verdict": None,
+                        }
+                        continue
+
+                    # Model routing for non-minimal tiers (or sampled minimal)
+                    model_override = self._classifier._config.models.get(tier)
+
                 score = await self._evaluator.evaluate(
-                    agent_output, self._dimensions
+                    agent_output, self._dimensions, model=model_override
                 )
+
+                # Tag score with tier
+                if tier is not None:
+                    from dataclasses import replace
+                    score = replace(score, tier=tier)
+
                 await self._store.save_score(score)
 
                 # Create verdict (fail-open, matches PipelineRouter pattern)

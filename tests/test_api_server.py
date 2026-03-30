@@ -162,7 +162,7 @@ def test_evaluate_sync_missing_fields(client):
 
 def test_evaluate_sync_timeout_returns_408():
     """Timeout falls back to async queue with 408."""
-    async def slow_evaluate(output, dims):
+    async def slow_evaluate(output, dims, model=None):
         await asyncio.sleep(10)
         return _make_score()
 
@@ -382,6 +382,31 @@ def test_evaluate_invalid_json_body(client):
     )
     assert resp.status_code == 422
     assert "Invalid JSON" in resp.json()["error"]
+
+
+def test_evaluate_sync_minimal_tier_auto_approves(mock_evaluator, mock_store, mock_tracker):
+    """Minimal tier with 0% sampling skips model call entirely."""
+    from nthlayer_measure.config import TieringConfig
+    from nthlayer_measure.tiering.classifier import TierClassifier
+
+    config = TieringConfig(enabled=True, default_tier="minimal", sampling_rate=0.0)
+    classifier = TierClassifier(config, manifests={})
+
+    app = create_app(
+        evaluator=mock_evaluator,
+        store=mock_store,
+        tracker=mock_tracker,
+        dimensions=["correctness"],
+        sync_timeout=5.0,
+        max_workers=1,
+        classifier=classifier,
+    )
+    c = TestClient(app)
+    resp = c.post("/api/v1/evaluate/sync", json={
+        "agent": "test-agent", "output": "hello",
+    })
+    assert resp.status_code == 200
+    mock_evaluator.evaluate.assert_not_called()
 
 
 def test_evaluate_sync_without_verdict_store(mock_evaluator, mock_store, mock_tracker):

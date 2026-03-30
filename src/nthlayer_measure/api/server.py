@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -21,8 +22,9 @@ from nthlayer_measure.api.queue import EvaluationQueue
 from nthlayer_measure.api.response import build_error_response, build_response
 from nthlayer_measure.pipeline.evaluator import Evaluator
 from nthlayer_measure.store.protocol import ScoreStore
+from nthlayer_measure.tiering.classifier import TierClassifier
 from nthlayer_measure.trends.tracker import TrendTracker
-from nthlayer_measure.types import AgentOutput
+from nthlayer_measure.types import AgentOutput, QualityScore
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ def create_app(
     sync_timeout: float = 30.0,
     max_workers: int = 5,
     cors_origins: list[str] | None = None,
+    classifier: TierClassifier | None = None,
 ) -> FastAPI:
     """Create a configured FastAPI application.
 
@@ -63,6 +66,7 @@ def create_app(
         verdict_store=verdict_store,
         approve_threshold=approve_threshold,
         max_workers=max_workers,
+        classifier=classifier,
     )
 
     @asynccontextmanager
@@ -140,9 +144,40 @@ def create_app(
             metadata=eval_req.metadata,
         )
 
+        # Tier classification (if enabled)
+        tier = None
+        model_override = None
+        if classifier is not None:
+            tier = classifier.classify(agent_output, agent_output.metadata)
+
+            if tier == "minimal" and not classifier.should_sample(tier, agent_output.agent_name):
+                # Auto-approve: skip model call entirely
+                auto_score = QualityScore(
+                    eval_id=str(uuid.uuid4()),
+                    agent_name=agent_output.agent_name,
+                    task_id=agent_output.task_id,
+                    dimensions={d: classifier._config.auto_approve_score for d in dimensions},
+                    confidence=0.0,
+                    evaluator_model="auto-approved",
+                    tier="minimal",
+                    auto_approved=True,
+                )
+                await store.save_score(auto_score)
+                return {
+                    "eval_id": auto_score.eval_id,
+                    "action": "approve",
+                    "dimensions": auto_score.dimensions,
+                    "confidence": auto_score.confidence,
+                    "tier": "minimal",
+                    "auto_approved": True,
+                }
+
+            # Model routing for non-minimal tiers (or sampled minimal)
+            model_override = classifier._config.models.get(tier)
+
         try:
             score = await asyncio.wait_for(
-                evaluator.evaluate(agent_output, dimensions),
+                evaluator.evaluate(agent_output, dimensions, model=model_override),
                 timeout=sync_timeout,
             )
         except asyncio.TimeoutError:
@@ -153,6 +188,11 @@ def create_app(
                     "message": f"Evaluation did not complete within {sync_timeout:.0f}s. Retry with POST /api/v1/evaluate for async processing.",
                 },
             )
+
+        # Tag score with tier
+        if tier is not None:
+            from dataclasses import replace
+            score = replace(score, tier=tier)
 
         await store.save_score(score)
 
