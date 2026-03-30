@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 from nthlayer_measure.adapters.protocol import Adapter
 from nthlayer_measure.detection.protocol import DegradationDetector
@@ -10,7 +11,9 @@ from nthlayer_measure.governance.engine import GovernanceEngine
 from nthlayer_measure.pipeline.evaluator import Evaluator
 from nthlayer_measure.store.protocol import ScoreStore
 from nthlayer_measure.telemetry import emit_decision_event
+from nthlayer_measure.tiering.classifier import TierClassifier
 from nthlayer_measure.trends.tracker import TrendTracker
+from nthlayer_measure.types import QualityScore
 from nthlayer_learn import create as verdict_create, VerdictStore as VerdictStoreBase
 
 import logging
@@ -39,6 +42,7 @@ class PipelineRouter:
         detection_window_days: int = 7,
         verdict_store: VerdictStoreBase | None = None,
         approve_threshold: float | None = None,
+        classifier: TierClassifier | None = None,
     ) -> None:
         self._adapter = adapter
         self._evaluator = evaluator
@@ -53,11 +57,43 @@ class PipelineRouter:
             approve_threshold if approve_threshold is not None
             else DEFAULT_APPROVE_THRESHOLD
         )
+        self._classifier = classifier
 
     async def run(self) -> None:
         """Process agent outputs through the full pipeline."""
         async for output in self._adapter.receive():
-            score = await self._evaluator.evaluate(output, self._dimensions)
+            # Tier classification (if enabled)
+            tier = None
+            model_override = None
+            if self._classifier is not None:
+                tier = self._classifier.classify(output, output.metadata)
+
+                if tier == "minimal" and not self._classifier.should_sample(tier, output.agent_name):
+                    # Auto-approve: skip model call
+                    auto_score = QualityScore(
+                        eval_id=str(uuid.uuid4()),
+                        agent_name=output.agent_name,
+                        task_id=output.task_id,
+                        dimensions={d: self._classifier._config.auto_approve_score for d in self._dimensions},
+                        confidence=0.0,
+                        evaluator_model="auto-approved",
+                        tier="minimal",
+                        auto_approved=True,
+                    )
+                    await self._store.save_score(auto_score)
+                    emit_decision_event(auto_score, None)
+                    continue
+
+                # Model routing for non-minimal tiers (or sampled minimal)
+                model_override = self._classifier._config.models.get(tier)
+
+            score = await self._evaluator.evaluate(output, self._dimensions, model=model_override)
+
+            # Tag score with tier
+            if tier is not None:
+                from dataclasses import replace
+                score = replace(score, tier=tier)
+
             await self._store.save_score(score)
 
             # Create verdict if verdict store is configured (fail open)
