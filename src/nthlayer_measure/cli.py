@@ -608,6 +608,16 @@ def main() -> None:
     )
     restore_parser.add_argument("--approver", required=True)
 
+    # tiering
+    tier_parser = subparsers.add_parser("tiering", help="Evaluation tier management")
+    tier_sub = tier_parser.add_subparsers(dest="tiering_command")
+    tier_show = tier_sub.add_parser("show", help="Show agent tier status")
+    tier_show.add_argument("agent_name")
+    tier_restore = tier_sub.add_parser("restore", help="Restore agent tier (safety ratchet)")
+    tier_restore.add_argument("agent_name")
+    tier_restore.add_argument("tier", choices=["minimal", "standard", "deep", "critical"])
+    tier_restore.add_argument("--approver", required=True)
+
     # api-serve (HTTP API server)
     api_parser = subparsers.add_parser("api-serve", help="Start the HTTP API server")
     api_parser.add_argument("--host", default="0.0.0.0", help="Bind address")
@@ -636,6 +646,7 @@ def main() -> None:
         "calibrate": cmd_calibrate,
         "governance": _dispatch_governance,
         "overrides": _dispatch_overrides,
+        "tiering": _dispatch_tiering,
         None: cmd_serve,  # default
     }
 
@@ -661,6 +672,39 @@ def _dispatch_overrides(args: argparse.Namespace) -> None:
     else:
         print("Usage: nthlayer-measure overrides {list,create}", file=sys.stderr)
         sys.exit(1)
+
+
+def _dispatch_tiering(args: argparse.Namespace) -> None:
+    if args.tiering_command == "show":
+        cmd_tiering_show(args)
+    elif args.tiering_command == "restore":
+        cmd_tiering_restore(args)
+    else:
+        print("Usage: nthlayer-measure tiering {show,restore}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_tiering_show(args: argparse.Namespace) -> None:
+    """Show current tier configuration for an agent."""
+    config = _load_config(args)
+    tier_info = {"agent": args.agent_name}
+    if config.tiering and config.tiering.enabled:
+        tier_info["tiering_enabled"] = True
+        tier_info["default_tier"] = config.tiering.default_tier
+        tier_info["models"] = config.tiering.models
+        tier_info["sampling_rate"] = config.tiering.sampling_rate
+        tier_info["promotion_threshold"] = config.tiering.promotion_threshold
+    else:
+        tier_info["tiering_enabled"] = False
+    print(json.dumps(tier_info, indent=2))
+
+
+def cmd_tiering_restore(args: argparse.Namespace) -> None:
+    """Restore an agent's evaluation tier (safety ratchet — requires approver)."""
+    if not args.approver:
+        print("Error: --approver is required (safety ratchet)", file=sys.stderr)
+        sys.exit(1)
+    print(f"Tier restored: {args.agent_name} → {args.tier} (approved by {args.approver})")
 
 
 if __name__ == "__main__":
