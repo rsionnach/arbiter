@@ -72,6 +72,24 @@ class TriggerConfig:
 
 
 @dataclass
+class TieringConfig:
+    """Configuration for tiered evaluation."""
+
+    enabled: bool = False
+    default_tier: str = "standard"
+    auto_approve_score: float = 1.0
+    models: dict[str, str] = field(default_factory=lambda: {
+        "standard": "anthropic/claude-haiku-4-20250414",
+        "deep": "anthropic/claude-sonnet-4-20250514",
+        "critical": "anthropic/claude-opus-4-20250514",
+    })
+    sampling_rate: float = 0.05
+    sampling_window_size: int = 100
+    quality_threshold: float = 0.6
+    promotion_threshold: float = 0.10
+
+
+@dataclass
 class MeasureConfig:
     """Top-level nthlayer-measure configuration matching measure.yaml shape."""
 
@@ -83,6 +101,7 @@ class MeasureConfig:
     agents: list[AgentConfig] = field(default_factory=list)
     verdict: VerdictConfig | None = None
     trigger: TriggerConfig = field(default_factory=TriggerConfig)
+    tiering: TieringConfig | None = None
 
 
 def load_config(path: Path) -> MeasureConfig:
@@ -143,6 +162,21 @@ def load_config(path: Path) -> MeasureConfig:
             respond_args=resp.get("args", {}),
         )
 
+    tiering_cfg = None
+    tiering_raw = raw.get("tiering")
+    if isinstance(tiering_raw, dict):
+        models = tiering_raw.get("models", {})
+        tiering_cfg = TieringConfig(
+            enabled=bool(tiering_raw.get("enabled", False)),
+            default_tier=str(tiering_raw.get("default_tier", "standard")),
+            auto_approve_score=float(tiering_raw.get("auto_approve_score", 1.0)),
+            models={**TieringConfig().models, **models},
+            sampling_rate=float(tiering_raw.get("sampling_rate", 0.05)),
+            sampling_window_size=int(tiering_raw.get("sampling_window_size", 100)),
+            quality_threshold=float(tiering_raw.get("quality_threshold", 0.6)),
+            promotion_threshold=float(tiering_raw.get("promotion_threshold", 0.10)),
+        )
+
     return MeasureConfig(
         evaluator=evaluator,
         store=store,
@@ -152,4 +186,5 @@ def load_config(path: Path) -> MeasureConfig:
         agents=agents,
         verdict=verdict_cfg,
         trigger=trigger_cfg,
+        tiering=tiering_cfg,
     )
