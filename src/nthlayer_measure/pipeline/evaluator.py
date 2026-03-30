@@ -19,7 +19,7 @@ class Evaluator(Protocol):
     It never interprets quality itself — that's the model's job (ZFC).
     """
 
-    async def evaluate(self, output: AgentOutput, dimensions: list[str]) -> QualityScore: ...
+    async def evaluate(self, output: AgentOutput, dimensions: list[str], model: str | None = None) -> QualityScore: ...
 
 
 @dataclass(frozen=True)
@@ -147,11 +147,21 @@ Respond with valid JSON only:
             output_tokens=result.output_tokens or 0,
         )
 
-    async def evaluate(self, output: AgentOutput, dimensions: list[str]) -> QualityScore:
+    async def evaluate(self, output: AgentOutput, dimensions: list[str], model: str | None = None) -> QualityScore:
+        effective_model = model or self._model
         prompt = self.build_prompt(output, dimensions)
-        model_response = await self._call_model(prompt)
+        # Temporarily use override model for the call
+        original_model = self._model
+        if model:
+            self._model = effective_model
+        try:
+            model_response = await self._call_model(prompt)
+        finally:
+            self._model = original_model
         score = self.parse_response(model_response.text, output)
-        cost = _compute_cost(self._model, model_response.input_tokens, model_response.output_tokens)
+        if model:
+            score = replace(score, evaluator_model=effective_model)
+        cost = _compute_cost(effective_model, model_response.input_tokens, model_response.output_tokens)
         if cost is not None:
             score = replace(score, cost_usd=cost)
         return score

@@ -128,3 +128,17 @@ async def test_evaluate_with_mock_client(evaluator, sample_output):
     assert score.agent_name == "agent-a"
     assert score.dimensions["correctness"] == pytest.approx(0.9)
     assert score.confidence == pytest.approx(0.85)
+
+
+@pytest.mark.asyncio
+async def test_evaluate_with_model_override(evaluator, sample_output):
+    response_json = json.dumps({
+        "dimensions": {"correctness": {"score": 0.9, "reasoning": "Good"}},
+        "confidence": 0.85,
+    })
+    mock_response = _ModelResponse(text=response_json, input_tokens=100, output_tokens=50)
+
+    with patch.object(evaluator, "_call_model", new_callable=AsyncMock, return_value=mock_response):
+        score = await evaluator.evaluate(sample_output, ["correctness"], model="anthropic/claude-haiku-4-20250414")
+
+    assert score.evaluator_model == "anthropic/claude-haiku-4-20250414"
