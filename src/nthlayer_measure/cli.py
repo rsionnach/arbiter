@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from dataclasses import asdict
@@ -187,6 +188,17 @@ def cmd_evaluate_once(args: argparse.Namespace) -> None:
 
             if r.breach:
                 breach_count += 1
+                # Slack notification for breach verdicts
+                slack_url = os.environ.get("SLACK_WEBHOOK_URL", "")
+                if slack_url:
+                    from nthlayer_common.slack import SlackNotifier
+                    from nthlayer_measure.notifications import build_breach_blocks
+                    blocks, text = build_breach_blocks(v)
+                    notifier = SlackNotifier(slack_url)
+                    thread_ts = await notifier.send(blocks, text)
+                    if thread_ts:
+                        v.metadata.custom["slack_thread_ts"] = thread_ts
+                        verdict_store.put(v)
 
         print(f"\nEvaluated {len(results)} SLOs, {breach_count} in breach.")
         return results
