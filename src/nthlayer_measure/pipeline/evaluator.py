@@ -10,10 +10,9 @@ from pathlib import Path
 from typing import Protocol
 
 from nthlayer_common.prompts import load_prompt, render_user_prompt
+from nthlayer_measure.types import AgentOutput, QualityScore
 
 _PROMPT_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "evaluator.yaml"
-
-from nthlayer_measure.types import AgentOutput, QualityScore
 
 
 class Evaluator(Protocol):

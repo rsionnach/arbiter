@@ -163,7 +163,7 @@ async def test_query_prometheus_returns_none_on_empty():
         request=httpx.Request("GET", "http://test/api/v1/query"),
     )
 
-    with patch("nthlayer_measure.adapters.prometheus.httpx.AsyncClient") as MockClient:
+    with patch("nthlayer_measure.adapters.prometheus.httpx.AsyncClient"):
         mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
@@ -199,7 +199,7 @@ def test_consecutive_breaches_counts_from_newest():
             subject={"type": "evaluation", "ref": "fraud-detect", "summary": f"test {i}"},
             judgment={"action": "flag", "confidence": 0.9},
             producer={"system": "nthlayer-measure"},
-            metadata={"custom": {"slo_name": "reversal_rate", "breach": True}},
+            metadata={"custom": {"slo_name": "reversal_rate", "breach": True, "current_value": 0.08, "target": 0.05}},
         )
         verdicts.append(v)
 
@@ -216,11 +216,12 @@ def test_consecutive_breaches_stops_at_non_breach():
     verdicts = []
     # 3 breaches, then 1 non-breach, then 2 breaches (older)
     for breach in [True, True, True, False, True, True]:
+        cv = 0.08 if breach else 0.02
         v = create(
             subject={"type": "evaluation", "ref": "fraud-detect", "summary": "test"},
             judgment={"action": "flag", "confidence": 0.9},
             producer={"system": "nthlayer-measure"},
-            metadata={"custom": {"slo_name": "reversal_rate", "breach": breach}},
+            metadata={"custom": {"slo_name": "reversal_rate", "breach": breach, "current_value": cv, "target": 0.05}},
         )
         verdicts.append(v)
 
@@ -288,7 +289,7 @@ async def test_evaluate_slos_judgment_hysteresis_reached(verdict_store):
             subject={"type": "evaluation", "ref": "fraud-detect", "summary": "breach"},
             judgment={"action": "flag", "confidence": 0.9},
             producer={"system": "nthlayer-measure"},
-            metadata={"custom": {"slo_name": "reversal_rate", "breach": True}},
+            metadata={"custom": {"slo_name": "reversal_rate", "breach": True, "current_value": 0.08, "target": 0.05}},
         )
         verdict_store.put(v)
 

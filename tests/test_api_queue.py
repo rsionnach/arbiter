@@ -148,7 +148,7 @@ async def test_callback_fires_on_completion(mock_evaluator, mock_store):
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
 
-            eval_id = await q.submit(req)
+            await q.submit(req)
             await asyncio.sleep(0.2)
 
             mock_client.post.assert_called_once()
