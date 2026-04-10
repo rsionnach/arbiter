@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main, develop]
 
+
+env:
+  UV_NO_SOURCES: "1"
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -27,7 +30,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --extra dev --extra otel --no-sources
+          uv sync --extra dev --extra otel
           uv pip install "nthlayer-learn>=0.2.0"
 
       - name: Run linting
@@ -48,7 +51,7 @@ jobs:
         run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra otel --no-sources
+        run: uv sync --extra dev --extra otel
 
       - name: Run ruff
         run: uv run --no-sync ruff check src/ tests/ --ignore E501,B008,F841,B007,E402,E721,E722,B012,I001,F821,E741
@@ -65,7 +68,7 @@ jobs:
         run: uv python install 3.11
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra otel --no-sources
+        run: uv sync --extra dev --extra otel
 
       - name: Run pip-audit
         run: |

@@ -1,8 +1,6 @@
 """Tests for nthlayer-measure config loading."""
 
-from pathlib import Path
 
-import pytest
 
 from nthlayer_measure.config import MeasureConfig, load_config
 

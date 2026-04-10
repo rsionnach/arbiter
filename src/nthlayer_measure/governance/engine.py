@@ -13,12 +13,11 @@ from pathlib import Path
 from typing import Protocol
 
 from nthlayer_common.prompts import load_prompt, render_user_prompt
-
-_PROMPT_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "governance.yaml"
-
 from nthlayer_measure.store.protocol import ScoreStore
 from nthlayer_measure.trends.tracker import TrendTracker
 from nthlayer_measure.types import AutonomyLevel, GovernanceAction, TrendWindow
+
+_PROMPT_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "governance.yaml"
 
 logger = logging.getLogger(__name__)
 

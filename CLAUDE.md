@@ -2,7 +2,7 @@
 
 Universal quality measurement engine for AI agent output. Evaluates agent output quality, tracks per-agent trends over rolling windows, detects degradation, self-calibrates its own judgment accuracy, and governs agent autonomy based on measured performance.
 
-**Status: fully implemented — pipeline, store, trends, calibration (MAE + judgment SLOs + verdict-based), governance, degradation detector, OTel instrumentation, cost tracking, CLI subcommands, OpenSRM manifest integration, verdict integration (Phase 1), three adapters (webhook, GasTown, Devin), Prometheus SLO polling adapter with evaluate-once subcommand, and FastAPI HTTP API server.**
+**Status: fully implemented — pipeline, store, trends, calibration (MAE + judgment SLOs + verdict-based), governance, degradation detector, OTel instrumentation, cost tracking, CLI subcommands, OpenSRM manifest integration, verdict integration (Phase 1), three adapters (webhook, GasTown, Devin), Prometheus SLO polling adapter with evaluate-once subcommand, FastAPI HTTP API server, and tiered evaluation.**
 
 ---
 
@@ -18,6 +18,28 @@ Universal quality measurement engine for AI agent output. Evaluates agent output
 - **Run security scan (non-blocking):** `uv pip install pip-audit && uv run --no-sync pip-audit --progress-spinner off`
 - **Run CLI:** `uv run nthlayer-measure serve | evaluate | status | calibrate | overrides | governance | evaluate-once | api-serve`
 - **CI:** pushes/PRs to `main` or `develop`; matrix tests Python 3.11 and 3.12
+<!-- END AUTO-MANAGED -->
+
+<!-- AUTO-MANAGED: prompts -->
+## Prompt Definitions (`prompts/`)
+
+YAML-based prompt definitions — migration from hardcoded Python strings to versioned YAML files complete. `ModelEvaluator.build_prompt()` and `ErrorBudgetGovernance.build_governance_prompt()` both load from YAML via `nthlayer_common.prompts.load_prompt` + `render_user_prompt`.
+
+**YAML structure:** each file has `name`, `version`, `system` (empty string — instructions live in `user_template`), `response_schema` (JSON Schema), and `user_template` (with `{schema_block}` and `{{ variable }}` placeholders).
+
+**Wiring pattern:**
+```python
+_PROMPT_PATH = Path(__file__).parent.parent.parent.parent / "prompts" / "evaluator.yaml"
+
+def build_prompt(self, output, dimensions):
+    spec = load_prompt(_PROMPT_PATH)
+    return render_user_prompt(spec.user_template, agent_name=..., task_id=..., ...)
+```
+
+| File | Serves | Key schema fields | Key template variables |
+|------|--------|-------------------|------------------------|
+| `prompts/evaluator.yaml` | `ModelEvaluator.build_prompt()` (`pipeline/evaluator.py`) | `dimensions.{score, reasoning}`, `confidence` | `agent_name`, `task_id`, `output_type`, `output_content`, `dimensions_block` |
+| `prompts/governance.yaml` | `ErrorBudgetGovernance.build_governance_prompt()` (`governance/engine.py`) | `should_reduce` (bool), `reason`, `confidence` | `agent_name`, `window_days`, `evaluation_count`, `confidence_mean`, `reversal_rate`, `current_level`, `dimension_averages`, `threshold`, `reduced_level` |
 <!-- END AUTO-MANAGED -->
 
 ---
@@ -105,13 +127,28 @@ Implemented adapters: webhook (generic HTTP POST), GasTown (polls bd quality-rev
 **Verdict shape from `evaluate-once`:**
 - `subject.type="evaluation"`, `subject.ref=service`
 - `judgment.action="flag"|"approve"`, `judgment.confidence=0.95` (traditional) or `0.85` (judgment)
-- `metadata.custom`: slo_type, slo_name, target, current_value, breach, consecutive
+- `metadata.custom`: slo_type, slo_name, target, current_value, breach, consecutive, `slack_thread_ts` (stored when Slack notification sent)
+
+**Slack breach notification (`evaluate-once`):**
+- Fires after `verdict_store.put()` for each breach verdict when `SLACK_WEBHOOK_URL` env var is set
+- Uses `build_breach_blocks(verdict)` from `nthlayer_measure.notifications` + `SlackNotifier` from `nthlayer_common.slack`
+- Stores returned `thread_ts` in `verdict.metadata.custom["slack_thread_ts"]` — downstream components (correlate, respond) thread their replies under this message
+- Fail-open: Slack unavailable or unconfigured has zero impact on verdict writing
+
+### Slack Notifications (`notifications.py`)
+
+`src/nthlayer_measure/notifications.py` — block builders for SLO breach messages.
+
+**`build_breach_blocks(verdict) -> tuple[list[dict], str]`**
+- Extracts from verdict: `subject.ref` (service), `metadata.custom` (slo_name, current_value, target, consecutive), `judgment.confidence`
+- Block format: header "⚠ SLO BREACH · {service}", body with SLO name/current%/target%/consecutive count, context footer with "nthlayer-measure · confidence X.XX · {verdict.id}"
+- Returns `(blocks, fallback_text)` — `fallback_text` used for plain-text Slack notifications
 
 ### HTTP API Server
 
 `api/` package — FastAPI HTTP API layer. Optional extra: `uv sync --extra api`. Requires `fastapi>=0.115` and `uvicorn[standard]>=0.34`. The `dev` extra includes `fastapi` for testing without uvicorn.
 
-**`create_app(evaluator, store, tracker, dimensions, governance=None, verdict_store=None, approve_threshold=0.5, sync_timeout=30.0, max_workers=5, cors_origins=None) -> FastAPI`**
+**`create_app(evaluator, store, tracker, dimensions, governance=None, verdict_store=None, approve_threshold=0.5, sync_timeout=30.0, max_workers=5, cors_origins=None, classifier: TierClassifier | None = None) -> FastAPI`**
 - CORS middleware enabled by default (`["*"]`); configurable via `cors_origins`.
 - Components injected via closure — no FastAPI `Depends`.
 - Lifespan context starts/stops `EvaluationQueue` workers on startup/shutdown.
@@ -126,16 +163,16 @@ Implemented adapters: webhook (generic HTTP POST), GasTown (polls bd quality-rev
 | `GET` | `/api/v1/evaluations/{eval_id}` | 200/404 | Poll for async result |
 | `POST` | `/api/v1/override` | 200/404/409/422/503 | Override a verdict; 503 if no verdict store |
 | `POST` | `/api/v1/confirm` | 200/404/409/422/503 | Confirm a verdict |
-| `POST` | `/api/v1/resolve/batch` | 200/503 | Batch override/confirm; per-item error reporting in results array |
+| `POST` | `/api/v1/resolve/batch` | 200/422/503 | Batch override/confirm; max 100 items (422 if exceeded); per-item error reporting in results array |
 | `GET` | `/api/v1/agents/{agent_name}/accuracy` | 200/503 | Accuracy report (`?window=30d`); optional governance block |
 | `GET` | `/api/v1/agents/{agent_name}/verdicts` | 200/503 | List verdicts (`?limit=20&status=...`) |
-| `GET` | `/api/v1/governance/{agent_name}` | 200/503 | Governance status; 503 if not configured |
+| `GET` | `/api/v1/governance/{agent_name}` | 200/503 | Governance status; 503 if not configured or on any fetch error |
 
 **`api/server.py` — `_parse_json(request)` helper:**
 - Wraps `request.json()` in try/except; returns `JSONResponse(422, "Invalid JSON in request body")` on any parse failure. Used by all POST endpoints before field validation.
 
 **`api/normalise.py` — `EvaluationRequest` + `normalise_input(body: dict)`:**
-- Required fields: `agent`, `output`. Missing either raises `ValueError`.
+- Required fields: `agent`, `output`. Missing **or empty/whitespace-only** either raises `ValueError` (validated via `.strip()`).
 - Optional with defaults: `task_id` (uuid4), `environment` ("production"), `context` (None), `service` (None), `callback_url` (None), `metadata` ({}).
 - Extra fields silently ignored.
 
@@ -145,7 +182,7 @@ Implemented adapters: webhook (generic HTTP POST), GasTown (polls bd quality-rev
 - `_results` is an `OrderedDict[str, dict]` capped at `MAX_RESULTS=10_000`; `submit()` evicts the oldest entry (`popitem(last=False)`) when the limit is exceeded — same LRU pattern as `BoundedSeenSet` in the polling adapters.
 - Result states: `queued` → `evaluating` → `complete` | `error`; `not_found` for unknown ids.
 - Creates verdicts on completion (mirrors `PipelineRouter` pattern, fail-open). Verdict creation failures logged at WARNING with `exc_info=True` (not silently swallowed).
-- Fires `callback_url` via httpx POST with 3 retries if set on the request.
+- `_send_callback`: uses a single `httpx.AsyncClient` (one client for all 3 retry attempts); exponential backoff — sleeps 1s then 2s between retries; does NOT retry 4xx responses (permanent client errors — returns immediately).
 
 **`api/response.py` — `build_response(verdict, governance=None)` + `build_error_response(status_code, message, details=None)`:**
 - Response keys: `verdict_id`, `action`, `score`, `confidence`, `dimensions`, `reasoning`, `risk_tier` (defaults to "standard"), optionally `governance`.
@@ -248,6 +285,14 @@ Implemented as ErrorBudgetGovernance. On each `check_agent` call, fetches the ag
 - Model call uses `nthlayer_common.llm.llm_call` via `asyncio.to_thread`, wrapped in `asyncio.wait_for` with a 60 s timeout. No direct Anthropic SDK.
 - Fails open: if no model is configured, or the model call fails for any reason, no governance action is taken and the error is logged at WARNING level.
 
+### Tiering Package
+
+`src/nthlayer_measure/tiering/` — implements tiered evaluation routing. Zero impact when `tiering.enabled: false`.
+
+- **`classifier.py` — `TierClassifier`:** Pure transport; resolves tier via 4-level priority chain: (1) `metadata.risk_tier` caller override, (2) OpenSRM manifest `spec.evaluation.tier`, (3) config `tiering.default_tier`, (4) fallback `"standard"`. No judgment logic.
+- **`promotion.py` — `TierPromotionChecker`:** One-way ratchet. When calibration sampling detects a sample failure rate > `promotion_threshold` (default 10%), auto-promotes the agent from `minimal` to `standard`. Emits a promotion verdict. Demotion requires explicit `tiering restore <agent> <tier> --approver <human>`.
+- **`QualityScore` additions:** `tier: str | None` records the resolved tier for each evaluation. `auto_approved: bool = False` marks minimal-tier evaluations that were passed without a model call.
+
 ---
 
 ## Verdict Integration
@@ -258,6 +303,8 @@ Every evaluation creates a verdict via `PipelineRouter.run()`. Every human overr
 - `PipelineRouter`: after `save_score()`, calls `verdict_create()` then `verdict_store.put()` then `store.set_verdict_id()`. Wrapped in try/except — fail open (logs WARNING, pipeline continues).
 - `SQLiteScoreStore`: after `save_override()`, calls `verdict_store.resolve(verdict_id, "overridden", override={"by": corrector})` outside the threading lock.
 - `VerdictCalibration` (`src/nthlayer_measure/calibration/verdict_calibration.py`): strangler fig alongside `JudgmentSLOChecker`. Queries `verdict_store.accuracy(AccuracyFilter(producer_system="arbiter", from_time=...))`. System-wide only — per-agent accuracy deferred to Phase 2+ (AccuracyFilter does not support filtering by subject.agent).
+
+**Tiered Evaluation (implemented, bead opensrm-8o6.2):** Spec: `docs/superpowers/specs/2026-03-30-tiered-evaluation-design.md`. 4 tiers: `minimal` (auto-approve, no model call, 5% calibration sampling), `standard` (cheap model), `deep` (default model), `critical` (frontier model). Tier resolution: `metadata.risk_tier` caller override → OpenSRM `spec.evaluation.tier` → config `tiering.default_tier` → `"standard"`. Promotion ratchet: sample failure rate > 10% auto-promotes minimal→standard; human approval via `tiering restore` to undo. Key files: `tiering/classifier.py` (`TierClassifier`), `tiering/promotion.py` (`TierPromotionChecker`), `TieringConfig` in `config.py`. `ModelEvaluator.evaluate()` gains optional `model` param for per-tier routing. `QualityScore` gains `tier: str | None` and `auto_approved: bool = False`. `tiering.enabled: false` by default — zero impact on existing deployments.
 
 **Verdict shape produced by nthlayer-measure:**
 - `subject.type`: always `"agent_output"` | `subject.ref`: task_id | `subject.agent`: agent_name | `subject.summary`: `"Evaluation of {agent_name}: {task_id}"`
@@ -317,7 +364,7 @@ These feed into NthLayer-generated dashboards and nthlayer-correlate correlation
 ```yaml
 # arbiter.yaml
 evaluator:
-  model: claude-sonnet-4-20250514
+  model: claude-sonnet-4-20250514  # overridden by NTHLAYER_MODEL env var if set
   max_tokens: 4096
   temperature: 0.0
 
@@ -368,6 +415,17 @@ trigger:
   respond:
     enabled: false
     args: {}
+
+# Optional — tiered evaluation. Disabled by default; zero impact on existing deployments.
+tiering:
+  enabled: false
+  default_tier: standard
+  models:
+    standard: anthropic/claude-haiku-4-20250414
+    deep: anthropic/claude-sonnet-4-20250514
+    critical: anthropic/claude-opus-4-20250514
+  sampling_rate: 0.05
+  promotion_threshold: 0.10
 ```
 
 **TriggerConfig** (`config.py`): `correlate_enabled`, `correlate_args`, `respond_enabled`, `respond_args`. Parsed from `trigger.correlate` and `trigger.respond` YAML blocks. Defaults to all disabled. Used by `evaluate-once` to invoke `nthlayer-correlate correlate` and/or `nthlayer-respond respond` when SLO breaches are detected.
@@ -394,6 +452,8 @@ trigger:
 | `governance restore <agent_name> <level> --approver P` | Restore autonomy; agent_name and level are positional, --approver is required (safety ratchet) |
 | `evaluate-once <specs_dir> --prometheus-url U --verdict-store PATH [--hysteresis N]` | One-shot Prometheus SLO evaluation: loads OpenSRM specs from dir, queries Prometheus, writes verdicts to verdict store, exits. Exits 2 if any breach detected. Verdict confidence: 0.95 (traditional SLO) or 0.85 (judgment SLO). When `trigger.correlate.enabled=true` in config, `_trigger_chain()` queries verdict store for most recent `nthlayer-measure/evaluation` verdict and invokes `nthlayer-correlate correlate --trigger-verdict <id>`; passes `--respond-args <json>` if respond also enabled. No measure.yaml required for core evaluation; config needed for trigger chain. |
 | `api-serve [--host H] [--port P] [--sync-timeout S] [--workers W]` | Start the FastAPI HTTP API server (requires `api` extra). Defaults: host `127.0.0.1`, port `8080`. OpenAPI docs at `http://{host}:{port}/docs`. Reads evaluator/store/governance/verdict config from `measure.yaml`. |
+| `tiering show <agent_name>` | Show current evaluation tier and promotion status for an agent. |
+| `tiering restore <agent_name> <tier> --approver <human>` | Restore agent to a lower tier; `--approver` required (safety ratchet — one-way promotion cannot be reversed without human approval). |
 
 ---
 
@@ -411,13 +471,13 @@ trigger:
 - `count_consecutive_breaches`: counts consecutive windows where `current > target` from newest verdict, stops at first non-breach, returns 0 when newest is not a raw breach.
 - `evaluate_slos`: healthy → no breach; judgment breach below hysteresis threshold (consecutive=1, breach=False); judgment breach at threshold (3 consecutive, breach=True); traditional SLO breaches immediately without hysteresis; recovery (value returns healthy) resets consecutive to 0; SLO with no Prometheus data (query returns None) is skipped — not included in results.
 
-`tests/test_api_normalise.py` — `normalise_input` unit tests. Coverage: all fields populated, minimal input fills defaults (uuid task_id, "production" environment), missing `agent` raises `ValueError`, missing `output` raises `ValueError`, extra fields silently ignored, returns `EvaluationRequest` type.
+`tests/test_api_normalise.py` — `normalise_input` unit tests. Coverage: all fields populated, minimal input fills defaults (uuid task_id, "production" environment), missing `agent` raises `ValueError`, missing `output` raises `ValueError`, empty/whitespace-only `agent` raises `ValueError`, empty/whitespace-only `output` raises `ValueError`, extra fields silently ignored, returns `EvaluationRequest` type.
 
-`tests/test_api_queue.py` — `EvaluationQueue` async tests. Uses `pytest-asyncio`. Coverage: `submit` returns `eval-` prefixed id, result is `complete` after processing, `not_found` for unknown id, `error` status on evaluator exception, verdict created and stored when `verdict_store` provided, `callback_url` fires httpx POST on completion.
+`tests/test_api_queue.py` — `EvaluationQueue` async tests. Uses `pytest-asyncio`. Coverage: `submit` returns `eval-` prefixed id, result is `complete` after processing, `not_found` for unknown id, `error` status on evaluator exception, verdict created and stored when `verdict_store` provided, `callback_url` fires httpx POST on completion (single client, exponential backoff, no retry on 4xx).
 
 `tests/test_api_response.py` — `build_response` / `build_error_response` tests. Coverage: all response keys present, dimensions defaults to `{}` when absent, governance block added only when passed, error response with/without `details`.
 
-`tests/test_api_server.py` — FastAPI server contract tests via `TestClient`. Coverage: health endpoint, async evaluate (202/queued), sync evaluate returns verdict, sync timeout returns 408 directly (no re-submission to queue), poll for nonexistent returns 404, poll after submit, override/confirm/batch (success, missing verdict 404, already-resolved 409, missing fields 422), accuracy and verdicts query endpoints, governance status and 503 when not configured, override 503 when no verdict store, malformed JSON body → 422 with "Invalid JSON" (`test_evaluate_invalid_json_body`), sync eval without verdict store → 200 score-based response with eval_id/action/dimensions/confidence (`test_evaluate_sync_without_verdict_store`).
+`tests/test_api_server.py` — FastAPI server contract tests via `TestClient`. Coverage: health endpoint, async evaluate (202/queued), sync evaluate returns verdict, sync timeout returns 408 directly (no re-submission to queue), poll for nonexistent returns 404, poll after submit, override/confirm/batch (success, missing verdict 404, already-resolved 409, missing fields 422, batch > 100 items → 422), accuracy and verdicts query endpoints, governance status and 503 when not configured (or on fetch error), override 503 when no verdict store, malformed JSON body → 422 with "Invalid JSON" (`test_evaluate_invalid_json_body`), sync eval without verdict store → 200 score-based response with eval_id/action/dimensions/confidence (`test_evaluate_sync_without_verdict_store`).
 
 `tests/test_verdict_integration.py` — Phase 1 integration test suite. Covers:
 - `TestVerdictConfig`: config loading with/without `verdict:` section; `VerdictConfig` default `store_path="verdicts.db"`.

@@ -192,7 +192,12 @@ def count_consecutive_breaches(
             and v.subject.ref == service
             and custom.get("slo_name") == slo_name
         ):
-            if custom.get("breach"):
+            # Count consecutive windows where value exceeded target,
+            # not where the final breach flag was set (which requires
+            # the threshold to already be met — a catch-22).
+            current = custom.get("current_value")
+            target = custom.get("target")
+            if current is not None and target is not None and current > target:
                 count += 1
             else:
                 break

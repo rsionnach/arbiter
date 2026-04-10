@@ -17,7 +17,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from nthlayer_measure.api.normalise import EvaluationRequest, normalise_input
+from nthlayer_measure.api.normalise import normalise_input
 from nthlayer_measure.api.queue import EvaluationQueue
 from nthlayer_measure.api.response import build_error_response, build_response
 from nthlayer_measure.pipeline.evaluator import Evaluator

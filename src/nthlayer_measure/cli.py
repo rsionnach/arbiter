@@ -10,9 +10,15 @@ import subprocess
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from nthlayer_measure.config import MeasureConfig, load_config
 from nthlayer_measure.types import AutonomyLevel
+
+if TYPE_CHECKING:
+    from nthlayer_measure.pipeline.evaluator import ModelEvaluator
+    from nthlayer_measure.store.sqlite import SQLiteScoreStore
+    from nthlayer_measure.trends.tracker import StoreTrendTracker
 
 
 def _load_config(args: argparse.Namespace) -> MeasureConfig:
@@ -616,7 +622,7 @@ def main() -> None:
     restore_parser.add_argument("agent_name")
     restore_parser.add_argument(
         "level",
-        choices=[l.value for l in AutonomyLevel],
+        choices=[level.value for level in AutonomyLevel],
     )
     restore_parser.add_argument("--approver", required=True)
 

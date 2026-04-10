@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from nthlayer_learn import MemoryStore, create as verdict_create
 from nthlayer_measure.api.server import create_app
-from nthlayer_measure.types import AgentOutput, AutonomyLevel, QualityScore, TrendWindow
+from nthlayer_measure.types import AutonomyLevel, QualityScore, TrendWindow
 
 
 def _make_score(agent="test-agent", task_id="task-1"):
