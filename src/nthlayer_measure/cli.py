@@ -189,6 +189,26 @@ def cmd_evaluate_once(args: argparse.Namespace) -> None:
                 }},
             )
             verdict_store.put(v)
+            # Write content-addressed decision record
+            if getattr(args, "decision_store", None):
+                from nthlayer_common.records.sqlite_store import SQLiteDecisionRecordStore
+                from nthlayer_common.records.verdict_bridge import write_decision_verdict
+
+                ds = SQLiteDecisionRecordStore(args.decision_store)
+                write_decision_verdict(
+                    ds,
+                    agent="measure-evaluate",
+                    incident_id=r.service,
+                    timestamp=v.timestamp,
+                    model="nthlayer-measure/prometheus",
+                    reasoning=f"{r.slo_name} {'BREACH' if r.breach else 'OK'}: {r.current_value:.4f} (target {r.target})",
+                    action={"slo_type": r.slo_type, "breach": r.breach, "consecutive": r.consecutive},
+                    prompt_text=f"evaluate {r.service}/{r.slo_name}",
+                    response_text=f"value={r.current_value}, target={r.target}",
+                    summaries_technical=f"{r.service} {r.slo_name}: {'BREACH' if r.breach else 'OK'} ({r.current_value:.4f} vs {r.target})",
+                    summaries_plain=f"{r.service} {r.slo_name} is {'breaching' if r.breach else 'within'} target",
+                    summaries_executive=f"{r.service} SLO {'breach' if r.breach else 'ok'}",
+                )
             status = "BREACH" if r.breach else "OK"
             print(f"  {r.service}/{r.slo_name}: {status} (value={r.current_value:.4f}, target={r.target}, consecutive={r.consecutive}) → {v.id}")
 
@@ -651,6 +671,10 @@ def main() -> None:
     eo_parser.add_argument(
         "--hysteresis", type=int, default=3,
         help="Consecutive breach windows before judgment SLO triggers (default: 3)",
+    )
+    eo_parser.add_argument(
+        "--decision-store", default=None,
+        help="Path to decision record SQLite DB for content-addressed records",
     )
 
     args = parser.parse_args()
