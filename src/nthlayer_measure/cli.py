@@ -582,6 +582,25 @@ def cmd_governance_restore(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    """Deprecated entry point — emits migration message and exits 1."""
+    import sys
+
+    sys.stderr.write(
+        "nthlayer-measure is deprecated as of v1.0.0 (2026-04-28).\n"
+        "\n"
+        "Functionality moved to nthlayer-workers (MeasureModule) as part of "
+        "the v1.5 tiered architecture consolidation.\n"
+        "\n"
+        "Migration:\n"
+        "  pip uninstall nthlayer-measure\n"
+        "  pip install nthlayer-workers\n"
+        "\n"
+        "See https://github.com/rsionnach/nthlayer-measure for details.\n"
+    )
+    sys.exit(1)
+
+
+def _legacy_main_kept_for_reference() -> None:
     """Entry point with subcommands."""
     parser = argparse.ArgumentParser(
         prog="nthlayer-measure",
